@@ -421,7 +421,7 @@ private struct NotchRootView: View {
         }
     }
 
-    /// The window's name; a click watches the other one. herdr shows agents and their state, but no messages.
+    /// The window's name; a click watches the other one.
     private var backendSwitch: some View {
         let current = store.backend ?? store.choice ?? .tern
         return Button { store.choose(current.other) } label: {

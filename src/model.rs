@@ -1,8 +1,9 @@
-//! Agents, subagents and the messages between them, built from Tern pane state and omp transcripts.
+//! Agents, subagents and the messages between them, built from pane state and agent transcripts.
 //!
 //! Evidence model: a cross-pane message is *sent* when the sender's transcript records a
-//! `tern run`/`tern send` to the pane, and *delivered* when the recipient's transcript records a
-//! user turn starting `From <sender pane>`. An IRC message carries omp's own receipt outcome.
+//! `tern run`/`tern send`/`hc send` to the pane, and *delivered* when the recipient's transcript
+//! records a user turn from that sender: `From <sender pane>` in Tern, `<hc from="<sender>">` in
+//! herdr, or, untagged, the sent text itself. An IRC message carries omp's own receipt outcome.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
@@ -24,6 +25,8 @@ const REPEAT_WINDOW_MS: i64 = 180_000;
 const REPLY_WINDOW_MS: i64 = 30 * 60_000;
 /// A subagent that has written nothing for this long is shown as idle.
 const SUB_IDLE_MS: i64 = 120_000;
+/// Untagged prompts kept for a later send to claim; older ones are the person's own.
+const UNTAGGED_KEPT: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Node {
@@ -101,6 +104,8 @@ pub struct Agent {
     pub todo: Option<(u32, u32)>,
     pub subs: BTreeMap<String, Sub>,
     pub last_ms: i64,
+    /// The API message whose usage was counted last; its other content blocks repeat it.
+    last_message: String,
 }
 
 impl Agent {
@@ -181,6 +186,8 @@ pub struct Model {
     /// Original IRC sends, scoped by transcript source and tool call id until their receipts arrive.
     irc_calls: HashMap<Node, HashMap<String, (i64, String)>>,
     next_seq: u64,
+    /// Prompts with no sender tag, by recipient, until a send with the same text claims them.
+    untagged: Vec<(PaneId, i64, String)>,
 }
 
 impl Model {
@@ -232,15 +239,8 @@ impl Model {
                 }
             }
             Event::User { ts, text } => {
-                if let (Node::Pane(_), Some((sender, title, body))) = (source, parse_from(&text)) {
-                    // A pane that closed before we saw it has no title; the envelope names it.
-                    let agent = self.agent(sender);
-                    if agent.pane.title.is_empty() && !agent.present {
-                        agent.pane.title = title.unwrap_or_default();
-                    }
-                    self.inbound(sender, pane, ts, body);
-                } else if matches!(source, Node::Pane(_)) {
-                    self.agent(pane).last_user = Some((ts, text));
+                if let Node::Pane(_) = source {
+                    self.user(pane, ts, text);
                 }
             }
             Event::Assistant {
@@ -248,6 +248,7 @@ impl Model {
                 text,
                 tokens,
                 cost,
+                message,
             } => {
                 let agent = self.agent(pane);
                 match source {
@@ -255,7 +256,10 @@ impl Model {
                         agent.subs.entry(name.clone()).or_default().tokens += tokens
                     }
                     Node::Pane(_) => {
-                        agent.tokens += tokens;
+                        if message.is_empty() || agent.last_message != message {
+                            agent.tokens += tokens;
+                        }
+                        agent.last_message = message;
                         agent.cost += cost;
                         if !text.trim().is_empty() {
                             agent.last_reply = Some((ts, text));
@@ -275,11 +279,25 @@ impl Model {
                 id,
                 name,
                 error,
-                tern_error,
+                send_error,
                 details,
             } => {
-                // A shell call fails for many reasons; only the CLI's own error line means the send failed.
-                let failed = if name == "bash" { tern_error } else { error };
+                // Claude Code's results do not name their tool; its open call does.
+                let name = match name.is_empty() {
+                    true => self
+                        .agents
+                        .get(&pane)
+                        .and_then(|a| a.open_calls.iter().find(|(call, _, _)| *call == id))
+                        .map(|(_, name, _)| name.clone())
+                        .unwrap_or_default(),
+                    false => name,
+                };
+                // A shell call fails for many reasons; only the CLI's own error means the send failed.
+                let failed = if name.eq_ignore_ascii_case("bash") {
+                    send_error
+                } else {
+                    error
+                };
                 self.tool_result(source, ts, &id, &name, failed, &details)
             }
             Event::IrcIn { .. } => {}
@@ -317,7 +335,12 @@ impl Model {
                 self.agent(pane).subs.entry(sub.clone()).or_default().tool = Some(name.clone())
             }
         }
-        match name.as_str() {
+        // omp's `bash`, Claude Code's `Bash`.
+        let kind = match name.eq_ignore_ascii_case("bash") {
+            true => "bash",
+            false => name.as_str(),
+        };
+        match kind {
             "bash" => {
                 let command = args
                     .get("command")
@@ -325,6 +348,12 @@ impl Model {
                     .unwrap_or_default();
                 for (target, text) in tern_sends(command) {
                     let seq = self.outbound(source.clone(), target, ts, text);
+                    self.pending_calls.entry(id.clone()).or_default().push(seq);
+                }
+                for (target, text) in hc_sends(command) {
+                    let to = self.resolve(&target);
+                    self.name_unseen(to, &target, None);
+                    let seq = self.outbound(source.clone(), to, ts, text);
                     self.pending_calls.entry(id.clone()).or_default().push(seq);
                 }
             }
@@ -537,10 +566,123 @@ impl Model {
             }
             return seq;
         }
+        if let Some(index) = self.untagged.iter().position(|(recipient, at, text)| {
+            *recipient == to
+                && text.trim() == body
+                && *at >= ts - MATCH_BEFORE_MS
+                && *at <= ts + MATCH_AFTER_MS
+        }) {
+            let (_, at, text) = self.untagged.remove(index);
+            // It was taken for the person's prompt until now.
+            let agent = self.agent(to);
+            if agent.last_user.as_ref() == Some(&(at, text)) {
+                agent.last_user = None;
+            }
+            let seq = self.record(
+                Kind::Pane,
+                from,
+                Node::Pane(to),
+                body,
+                Some(ts),
+                Some(at),
+                None,
+            );
+            if self.live {
+                self.changes.push(Change::Delivered(seq));
+            }
+            self.link_reply(seq);
+            return seq;
+        }
         self.agent(to);
         let seq = self.record(Kind::Pane, from, Node::Pane(to), body, Some(ts), None, None);
         self.link_reply(seq);
         seq
+    }
+
+    /// A user turn of `pane`: a message whose envelope or hc tag names its sender, a message
+    /// matched to a recorded send by its text, or the person's own prompt.
+    fn user(&mut self, pane: PaneId, ts: i64, text: String) {
+        if let Some((sender, title, body)) = parse_from(&text) {
+            // A pane that closed before we saw it has no title; the envelope names it.
+            let agent = self.agent(sender);
+            if agent.pane.title.is_empty() && !agent.present {
+                agent.pane.title = title.unwrap_or_default();
+            }
+            return self.inbound(sender, pane, ts, body);
+        }
+        match parse_hc(&text) {
+            Some((Some((address, name)), body)) => {
+                let sender = self.resolve(&address);
+                self.name_unseen(sender, &address, name);
+                self.inbound(sender, pane, ts, body);
+            }
+            // hc's own note, such as a child's exit.
+            Some((None, _)) => {}
+            None => {
+                if !self.deliver_untagged(pane, ts, &text) {
+                    if self.untagged.len() >= UNTAGGED_KEPT {
+                        self.untagged.remove(0);
+                    }
+                    self.untagged.push((pane, ts, text.clone()));
+                    self.agent(pane).last_user = Some((ts, text));
+                }
+            }
+        }
+    }
+
+    /// Marks a recorded send to `pane` with exactly this text as delivered.
+    fn deliver_untagged(&mut self, pane: PaneId, ts: i64, text: &str) -> bool {
+        let candidate = self
+            .messages
+            .iter_mut()
+            .filter(|m| {
+                m.kind == Kind::Pane
+                    && m.delivered.is_none()
+                    && m.to == Node::Pane(pane)
+                    && m.text == text.trim()
+            })
+            .filter(|m| {
+                m.sent
+                    .is_some_and(|s| s <= ts + MATCH_BEFORE_MS && s >= ts - MATCH_AFTER_MS)
+            })
+            .min_by_key(|m| m.sent);
+        let Some(message) = candidate else {
+            return false;
+        };
+        message.delivered = Some(ts);
+        let seq = message.seq;
+        if self.live {
+            self.changes.push(Change::Delivered(seq));
+        }
+        true
+    }
+
+    /// The pane an hc target names: a terminal's address or a live terminal's name, else the
+    /// address itself.
+    fn resolve(&self, target: &str) -> PaneId {
+        self.agents
+            .values()
+            .find(|a| a.pane.address == target)
+            .or_else(|| {
+                self.agents
+                    .values()
+                    .find(|a| a.present && a.pane.name.as_deref() == Some(target))
+            })
+            .map_or_else(|| crate::herdr::pane_id(target), |a| a.pane.id)
+    }
+
+    /// A terminal known only from a message: give it the hc address and name it was given.
+    fn name_unseen(&mut self, pane: PaneId, address: &str, name: Option<String>) {
+        let agent = self.agent(pane);
+        if agent.present {
+            return;
+        }
+        if agent.pane.address == pane.to_string() {
+            agent.pane.address = address.to_string();
+        }
+        if agent.pane.title.is_empty() {
+            agent.pane.title = name.unwrap_or_default();
+        }
     }
 
     /// A delivery recorded by the recipient. Merges with a send already read from the sender.
@@ -792,6 +934,14 @@ static REPLY_HINT: LazyLock<Regex> =
 /// The envelope as the sender typed it, before the shell expanded `$TERN_PANE`.
 static ENVELOPE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*From (?:\d+|\$\{?TERN_PANE\}?)(?: \([^)]*\))?:\s*").unwrap());
+/// hc's delivery tag: `<hc from="<address> <name>" reach="…">body</hc>`, or a bare `<hc>` note.
+/// hc does not escape the body, so it runs to the last `</hc>`.
+static HC_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)^\s*<hc((?:\s+[a-z]+="[^"]*")*)\s*>(.*)</hc>\s*$"#).unwrap()
+});
+static HC_FROM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bfrom="([^"]*)""#).unwrap());
+static HC_CALL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:hc|herdr-core)\s+send\s").unwrap());
 
 /// `From <pane> (<title>): <body>` → (pane, title, body). Generic titles such as `(omp)` name the
 /// harness, not the agent, and come back as `None`.
@@ -867,6 +1017,51 @@ fn quoted_at(command: &str, at: usize) -> bool {
         }
     }
     single || double
+}
+
+/// An hc sender: its terminal address and, when it has one, its name.
+type HcSender = (String, Option<String>);
+
+/// A turn hc delivered → (sender, body). A note without `from` has no sender.
+fn parse_hc(text: &str) -> Option<(Option<HcSender>, String)> {
+    let captures = HC_TAG.captures(text)?;
+    let sender = HC_FROM.captures(&captures[1]).and_then(|from| {
+        let mut words = from[1].splitn(2, ' ');
+        let address = words.next().filter(|a| !a.is_empty())?.to_string();
+        let name = words.next().map(str::trim).filter(|n| !n.is_empty());
+        Some((address, name.map(str::to_string)))
+    });
+    Some((sender, captures[2].trim().to_string()))
+}
+
+/// Every `hc send [options] <terminal> <text>` in a shell command, as (terminal, text). Skips
+/// targets given by a variable, such as the sender's own `$HC_TERMINAL_ID`.
+pub fn hc_sends(command: &str) -> Vec<(String, String)> {
+    let mut sends = Vec::new();
+    for found in HC_CALL.find_iter(command) {
+        if quoted_at(command, found.start()) {
+            continue;
+        }
+        let mut positional = Vec::new();
+        let mut words = shell_words(&command[found.end()..]).into_iter();
+        let mut options_done = false;
+        while let Some(word) = words.next() {
+            match word.as_str() {
+                "--" if !options_done => options_done = true,
+                "--if" | "--timeout" if !options_done => {
+                    words.next();
+                }
+                option if !options_done && option.starts_with("--") => {}
+                _ => positional.push(word),
+            }
+        }
+        if let [target, text, ..] = positional.as_slice()
+            && !target.starts_with('$')
+        {
+            sends.push((target.clone(), text.clone()));
+        }
+    }
+    sends
 }
 
 /// Shell words up to the end of the simple command (`;`, `&`, `|` or a newline outside quotes).
@@ -1001,6 +1196,183 @@ line' ; tern run $TERN_PANE "self" ; tern send 7 keys enter ; tern run SDK "by t
         assert_eq!(model.name(&Node::Pane(2)), "DEMO");
     }
 
+    fn claude_bash(ts: i64, id: &str, command: &str) -> Event {
+        Event::ToolCall {
+            ts,
+            id: id.into(),
+            name: "Bash".into(),
+            args: serde_json::json!({"command": command}),
+            intent: String::new(),
+        }
+    }
+
+    fn herdr_panes(model: &mut Model) -> (PaneId, PaneId) {
+        let (lead, review) = (crate::herdr::pane_id("t1"), crate::herdr::pane_id("t2"));
+        model.apply_panes(vec![
+            Pane {
+                id: lead,
+                address: "t1".into(),
+                ..Pane::default()
+            },
+            Pane {
+                id: review,
+                address: "t2".into(),
+                name: Some("review".into()),
+                ..Pane::default()
+            },
+        ]);
+        (lead, review)
+    }
+
+    #[test]
+    fn counts_a_claude_messages_usage_once_across_its_content_blocks() {
+        let mut model = Model::default();
+        let block = |message: &str| Event::Assistant {
+            ts: 1,
+            text: String::new(),
+            tokens: 100,
+            cost: 0.0,
+            message: message.into(),
+        };
+        model.apply(
+            1,
+            None,
+            vec![block("m1"), block("m1"), block("m2"), block(""), block("")],
+        );
+        assert_eq!(model.agents[&1].tokens, 400);
+    }
+
+    #[test]
+    fn finds_hc_sends_after_options_and_skips_variable_targets() {
+        let command = r#"~/.local/bin/hc send --if idle --wait review "Two bugs; see x.rs" && hc send -- t7 '--literal' ; hc send "$HC_TERMINAL_ID" self; echo "hc send t9 quoted""#;
+        assert_eq!(
+            hc_sends(command),
+            vec![
+                ("review".to_string(), "Two bugs; see x.rs".to_string()),
+                ("t7".to_string(), "--literal".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_hc_tags_with_unescaped_bodies() {
+        assert_eq!(
+            parse_hc(r#"<hc from="t3 lead" reach="hc send t3 when done">a < b & "c" </hc> x</hc>"#),
+            Some((
+                Some(("t3".to_string(), Some("lead".to_string()))),
+                r#"a < b & "c" </hc> x"#.to_string()
+            ))
+        );
+        assert_eq!(
+            parse_hc("<hc>t4 exited</hc>"),
+            Some((None, "t4 exited".to_string()))
+        );
+        assert_eq!(parse_hc("see <hc from=\"t1\">x</hc>"), None);
+    }
+
+    #[test]
+    fn an_hc_send_is_delivered_by_its_tag_in_either_read_order() {
+        for lead_first in [true, false] {
+            let mut model = Model::default();
+            let (lead, review) = herdr_panes(&mut model);
+            let send = (
+                lead,
+                vec![claude_bash(1_000, "c1", "hc send review 'Review x.rs'")],
+            );
+            let delivery = (
+                review,
+                vec![user(2_000, r#"<hc from="t1 lead">Review x.rs</hc>"#)],
+            );
+            let (first, second) = if lead_first {
+                (send, delivery)
+            } else {
+                (delivery, send)
+            };
+            model.apply(first.0, None, first.1);
+            model.apply(second.0, None, second.1);
+            assert_eq!(model.messages.len(), 1, "lead first: {lead_first}");
+            let message = &model.messages[0];
+            assert_eq!(
+                (&message.from, &message.to),
+                (&Node::Pane(lead), &Node::Pane(review))
+            );
+            assert_eq!(
+                (message.sent, message.delivered),
+                (Some(1_000), Some(2_000))
+            );
+            assert_eq!(message.text, "Review x.rs");
+            assert!(model.agents[&review].last_user.is_none());
+        }
+    }
+
+    #[test]
+    fn an_untagged_turn_with_the_sent_text_is_the_delivery_in_either_read_order() {
+        for lead_first in [true, false] {
+            let mut model = Model::default();
+            let (lead, review) = herdr_panes(&mut model);
+            let send = (
+                lead,
+                vec![claude_bash(1_000, "c1", "hc send t2 'Review x.rs'")],
+            );
+            let delivery = (review, vec![user(2_000, "Review x.rs\n")]);
+            let (first, second) = if lead_first {
+                (send, delivery)
+            } else {
+                (delivery, send)
+            };
+            model.apply(first.0, None, first.1);
+            model.apply(second.0, None, second.1);
+            assert_eq!(model.messages.len(), 1, "lead first: {lead_first}");
+            assert_eq!(
+                (model.messages[0].sent, model.messages[0].delivered),
+                (Some(1_000), Some(2_000))
+            );
+            assert!(
+                model.agents[&review].last_user.is_none(),
+                "lead first: {lead_first}"
+            );
+        }
+        // A different text is the person's own prompt.
+        let mut model = Model::default();
+        let (_, review) = herdr_panes(&mut model);
+        model.apply(review, None, vec![user(2_000, "run the tests")]);
+        assert!(model.messages.is_empty());
+        assert_eq!(
+            model.agents[&review].last_user,
+            Some((2_000, "run the tests".to_string()))
+        );
+    }
+
+    #[test]
+    fn only_hcs_own_error_fails_a_claude_send() {
+        let mut model = Model::default();
+        let (lead, _) = herdr_panes(&mut model);
+        let result = |id: &str, error: bool, send_error: bool| Event::ToolResult {
+            ts: 1_100,
+            id: id.into(),
+            name: String::new(),
+            error,
+            send_error,
+            details: Value::Null,
+        };
+        model.apply(
+            lead,
+            None,
+            vec![
+                claude_bash(1_000, "ok", "hc send t2 a; false"),
+                claude_bash(1_000, "bad", "hc send t2 b"),
+                result("ok", true, false),
+                result("bad", true, true),
+            ],
+        );
+        let failed: Vec<_> = model
+            .messages
+            .iter()
+            .map(|m| (m.text.as_str(), m.failed))
+            .collect();
+        assert_eq!(failed, vec![("a", false), ("b", true)]);
+    }
+
     #[test]
     fn matches_send_and_delivery_in_either_read_order_and_links_the_reply() {
         for sender_first in [true, false] {
@@ -1050,12 +1422,12 @@ line' ; tern run $TERN_PANE "self" ; tern send 7 keys enter ; tern run SDK "by t
             live: true,
             ..Model::default()
         };
-        let result = |id: &str, tern_error| Event::ToolResult {
+        let result = |id: &str, send_error| Event::ToolResult {
             ts: 1,
             id: id.into(),
             name: "bash".into(),
             error: true,
-            tern_error,
+            send_error,
             details: Value::Null,
         };
         // `tern run 2 a && grep -c x` exits 1 from grep: the shell call failed, the send did not.
@@ -1095,7 +1467,7 @@ line' ; tern run $TERN_PANE "self" ; tern send 7 keys enter ; tern run SDK "by t
             id: id.into(),
             name: "write".into(),
             error: false,
-            tern_error: false,
+            send_error: false,
             details: serde_json::json!({"message": {"op": "send", "from": from,
                 "receipts": [{"to": "Scout", "outcome": "injected"},
                              {"to": "Reviewer", "outcome": "woken"}]}}),
@@ -1149,7 +1521,7 @@ line' ; tern run $TERN_PANE "self" ; tern send 7 keys enter ; tern run SDK "by t
             id: "w".into(),
             name: "write".into(),
             error: false,
-            tern_error: false,
+            send_error: false,
             details: serde_json::json!({"message": {"op": "send", "from": "Scout", "to": "Main",
                 "receipts": [{"to": "Main", "outcome": "injected"}]}}),
         };

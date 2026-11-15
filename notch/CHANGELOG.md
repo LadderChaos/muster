@@ -12,6 +12,8 @@
 - Accept optional `id` and `repeat_of` stream fields while preserving older watcher compatibility. Stable receipt identity prevents late send observations or repeat reclassification from replaying fresh-message reactions; presentation limits leave the loaded message data intact
 - Focus and Send run the bundled `muster --focus` / `--send` against the watched window instead of calling `tern` directly. A failed action appears as a banner. Stream agents decode the optional `address`, `status`, and `parent` fields and the snapshot's `backend`; older watchers still decode
 - The agent headline omits the token count when the stream reports none
+- Stream agents decode `transcript` in place of `omp`: the watcher now also reads Claude Code transcripts of local herdr terminals, so the flag no longer means an omp transcript
+- herdr mode shows conversations, **Live** and the conversation chips, as Tern mode does: the watcher reads the transcripts of Claude Code agents in local herdr terminals. The **HERDR AGENTS** tree shows only until a conversation exists. Agent details list exchanges below Started by and Started; for an agent without a transcript, they say that only messages sent to it show, with delivery unknown. **Subagents** stays hidden in herdr mode
 - The watcher no longer outlives the app. The app holds a pipe on the watcher's stdin, so the watcher exits even when the app is killed, and stopping, restarting or switching windows ends the watcher's whole process group, including its `tern events` or `hc events` command
 
 ### Added

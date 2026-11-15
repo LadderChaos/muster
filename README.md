@@ -1,8 +1,9 @@
 # muster
 
-A live terminal map of coding agents and orchestration traffic in Stencil's Tern,
-or of the agents in a herdr window. Uses the official `tern` CLI and local omp
-transcripts, or herdr-core's `hc`. No plugin or relay service is required.
+A live terminal map of coding agents and orchestration traffic in Stencil's Tern
+or a herdr window. Uses the official `tern` CLI and local omp transcripts, or
+herdr-core's `hc` and local Claude Code transcripts. No plugin or relay service is
+required.
 
 ![muster showing four omp agents: a lead sends tasks to API, web and docs agents, and their replies arrive in the message feed](assets/muster.png)
 
@@ -55,10 +56,17 @@ between events.
 With `--backend herdr`, muster reads a persistent `hc events --json`
 subscription. It shows each terminal that runs an agent, the state the agent
 reports (`working`, `idle`, `blocked`, `done` or `error`) and which agent started
-which. herdr reports no message text, so the feed stays empty and no packets
-move. Addresses are hc terminal addresses, such as `t7` or `vps/t7` for a remote
-core. `m` and `--send` use `hc send`; Enter and `--focus` use `herdr-app` and need
-the Herdr window to be open.
+which. hc reports no message text, so for a local terminal that runs Claude Code,
+muster finds the process's transcript through `~/.claude/sessions/<pid>.json`
+(or `$CLAUDE_CONFIG_DIR`) and reads its turns, tools, model and tokens. A message
+is sent when a transcript records an `hc send <terminal> <text>` call, and
+delivered when the recipient's transcript records the `<hc from="…">` turn hc
+typed, or a turn with exactly the sent text. Messages between other agents, and
+any message of a remote terminal, do not show. Addresses are hc terminal
+addresses, such as `t7` or `vps/t7` for a remote core; `hc send` targets given as
+terminal names resolve to live terminals of that name. `m` and `--send` use
+`hc send`; Enter and `--focus` use `herdr-app` and need the Herdr window to be
+open.
 
 ## Keys
 
@@ -108,8 +116,9 @@ muster --backend herdr --focus vps/t7
 muster runs in, else a running Tern, else a running herdr core. Every JSON
 snapshot names its `backend`. Each agent has an `address` (the Tern pane number,
 or the hc terminal address), a `status` (`working` or `idle`, or herdr's
-`blocked`, `done` or `error`), and a nullable `parent` (the herdr agent that
-started it). `--send ADDRESS TEXT` types the text into that pane and presses
+`blocked`, `done` or `error`), a nullable `parent` (the herdr agent that
+started it), and `transcript` (whether muster reads the agent's transcript, so
+can see deliveries to it). `--send ADDRESS TEXT` types the text into that pane and presses
 Enter; `--focus ADDRESS` shows the pane in its window. Both exit nonzero with an
 error on stderr when the backend refuses.
 

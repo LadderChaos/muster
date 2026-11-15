@@ -8,7 +8,7 @@ struct MusterSnapshot: Decodable {
     let error: String?
 }
 
-/// The window muster reads. herdr reports agents and their state, but no message text.
+/// The window muster reads. herdr carries no message text; the watcher reads local Claude Code transcripts.
 enum MusterBackend: String, Decodable {
     case tern
     case herdr
@@ -33,7 +33,7 @@ struct MusterAgent: Decodable, Identifiable {
     let session: String
     let tab: UInt32
     let open: Bool
-    let omp: Bool
+    let transcript: Bool
     let cli: String?
     let working: Bool
     /// `working`, `idle`, or herdr's own words `blocked`, `done` and `error`.

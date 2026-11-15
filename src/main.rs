@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod claude;
 mod herdr;
 mod model;
 mod pane;
@@ -229,7 +230,13 @@ fn apply(app: &mut App, update: Update) {
 fn load(backend: &Backend, history: u64) -> Result<Model> {
     let mut model = Model::default();
     match backend {
-        Backend::Herdr { hc, .. } => model.apply_panes(herdr::terminals(hc)?),
+        Backend::Herdr { hc, .. } => {
+            let (panes, batch) = claude::Follower::new(history).panes(herdr::terminals(hc)?);
+            model.apply_panes(panes);
+            for (pane, events) in batch {
+                model.apply(pane, None, events);
+            }
+        }
         Backend::Tern { bin } => load_tern(&mut model, bin, history)?,
     }
     model.live = true;
@@ -376,7 +383,7 @@ fn snapshot_value(model: &Model, backend: &str) -> Value {
             json!({
                 "pane": a.pane.id, "address": a.pane.address, "label": label, "title": a.pane.title, "description": description,
                 "cwd": a.pane.cwd, "session": a.pane.session, "tab": a.pane.tab, "open": a.present,
-                "omp": a.has_transcript(), "cli": a.pane.cli, "working": a.pane.working, "status": a.pane.state(),
+                "transcript": a.has_transcript(), "cli": a.pane.cli, "working": a.pane.working, "status": a.pane.state(),
                 "parent": a.pane.parent, "quiet_ms": a.pane.quiet_ms,
                 "model": a.model, "tokens": a.tokens, "tool": a.tool().map(|(t, i)| json!({"name": t, "intent": i})),
                 "todo": a.todo.map(|(d, t)| json!({"done": d, "total": t})),

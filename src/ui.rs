@@ -1011,9 +1011,12 @@ fn draw_inspector(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         ]));
     }
     if let Some(cli) = &agent.pane.cli {
-        let note = match app.backend {
-            Backend::Tern { .. } => "no omp transcript, so deliveries to it are not observable",
-            Backend::Herdr { .. } => "herdr reports its state, not its messages",
+        let note = match (&app.backend, agent.has_transcript()) {
+            (_, true) => "messages from its transcript",
+            (Backend::Tern { .. }, false) => {
+                "no omp transcript, so deliveries to it are not observable"
+            }
+            (Backend::Herdr { .. }, false) => "not a local Claude Code, so only its state shows",
         };
         lines.push(Line::from(vec![
             key("agent"),
@@ -1442,7 +1445,7 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
             ),
             None => match app.backend {
                 Backend::Tern { .. } => "No messages yet. Agents talk with\n`tern run <pane> \"From $TERN_PANE …\"`,\nIRC, and subagents.".to_string(),
-                Backend::Herdr { .. } => "herdr reports no message text,\nso only agents and their state show.".to_string(),
+                Backend::Herdr { .. } => "No messages yet. Agents talk with\n`hc send <terminal> \"…\"`; muster reads\nlocal Claude Code transcripts.".to_string(),
             },
         };
         frame.render_widget(Paragraph::new(text).style(theme.dim()), inner);

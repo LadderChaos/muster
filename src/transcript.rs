@@ -1,4 +1,5 @@
-//! Tails omp session files (`~/.omp/agent/sessions/**.jsonl`) and turns their entries into events.
+//! Tails agent session files and turns their entries into events: omp's
+//! (`~/.omp/agent/sessions/**.jsonl`) and Claude Code's (`~/.claude/projects/*/<session>.jsonl`).
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -110,16 +111,20 @@ impl Tail {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Model(String),
-    /// A user turn. Cross-pane messages arrive as user turns that start with `From <pane>`.
+    /// A user turn. Cross-pane messages arrive as user turns that start with `From <pane>`, or
+    /// as `<hc from="…">` in herdr.
     User {
         ts: i64,
         text: String,
     },
+    /// `message` is the API message ID when the transcript has one. Claude Code writes one entry
+    /// per content block and repeats the message's usage in each.
     Assistant {
         ts: i64,
         text: String,
         tokens: u64,
         cost: f64,
+        message: String,
     },
     ToolCall {
         ts: i64,
@@ -128,14 +133,14 @@ pub enum Event {
         args: Value,
         intent: String,
     },
-    /// `tern_error`: the output has a `tern run:` / `tern send:` error line, the CLI's report of a
-    /// send that failed (for example `no block is called …`).
+    /// `send_error`: the output has the CLI's report of a send that failed: a `tern run:` /
+    /// `tern send:` error line (for example `no block is called …`), or hc's `{"error": …}`.
     ToolResult {
         ts: i64,
         id: String,
         name: String,
         error: bool,
-        tern_error: bool,
+        send_error: bool,
         details: Value,
     },
     /// An IRC message this agent received.
@@ -178,6 +183,7 @@ pub fn parse(entry: &Value) -> Vec<Event> {
             _ => Vec::new(),
         },
         "message" => message(entry, ts),
+        "user" | "assistant" => claude(entry, ts),
         _ => Vec::new(),
     }
 }
@@ -237,6 +243,7 @@ fn message(entry: &Value, ts: i64) -> Vec<Event> {
                     .and_then(|u| u.pointer("/cost/total"))
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0),
+                message: String::new(),
             });
             events
         }
@@ -250,14 +257,124 @@ fn message(entry: &Value, ts: i64) -> Vec<Event> {
                 .get("isError")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            tern_error: {
-                let text = joined_text(message.get("content").and_then(Value::as_array), "text");
-                text.contains("tern run: ") || text.contains("tern send: ")
-            },
+            send_error: send_error(&joined_text(
+                message.get("content").and_then(Value::as_array),
+                "text",
+            )),
             details: message.get("details").cloned().unwrap_or(Value::Null),
         }],
         _ => Vec::new(),
     }
+}
+
+/// Claude Code's entries: `user` (a prompt, or tool results) and `assistant` (one entry per
+/// content block). Sidechains, meta entries and compaction summaries are not turns.
+fn claude(entry: &Value, ts: i64) -> Vec<Event> {
+    let skipped = ["isSidechain", "isMeta", "isCompactSummary"]
+        .iter()
+        .any(|key| entry.get(key).and_then(Value::as_bool) == Some(true));
+    let Some(message) = entry.get("message").filter(|_| !skipped) else {
+        return Vec::new();
+    };
+    let user = entry["type"] == "user";
+    match message.get("content") {
+        Some(Value::String(text)) if user => claude_prompt(ts, text),
+        Some(Value::Array(parts)) if user => {
+            let results: Vec<Event> = parts
+                .iter()
+                .filter(|part| part["type"] == "tool_result")
+                .map(|part| {
+                    let text = match &part["content"] {
+                        Value::String(text) => text.clone(),
+                        Value::Array(content) => joined_text(Some(content), "text"),
+                        _ => String::new(),
+                    };
+                    Event::ToolResult {
+                        ts,
+                        id: str_at(part, "tool_use_id").unwrap_or_default().to_string(),
+                        // Results do not name their tool; the model knows it from the call.
+                        name: String::new(),
+                        error: part["is_error"].as_bool().unwrap_or(false),
+                        send_error: send_error(&text),
+                        details: Value::Null,
+                    }
+                })
+                .collect();
+            if results.is_empty() {
+                claude_prompt(ts, &joined_text(Some(parts), "text"))
+            } else {
+                results
+            }
+        }
+        Some(Value::Array(parts)) => {
+            let mut events: Vec<Event> = parts
+                .iter()
+                .filter(|part| part["type"] == "tool_use")
+                .map(|part| Event::ToolCall {
+                    ts,
+                    id: str_at(part, "id").unwrap_or_default().to_string(),
+                    name: str_at(part, "name").unwrap_or_default().to_string(),
+                    intent: part
+                        .pointer("/input/description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    args: part.get("input").cloned().unwrap_or(Value::Null),
+                })
+                .collect();
+            // `<synthetic>` marks messages Claude Code wrote itself.
+            if let Some(model) = str_at(message, "model").filter(|m| !m.starts_with('<')) {
+                events.push(Event::Model(model.to_string()));
+            }
+            let usage = message.get("usage");
+            events.push(Event::Assistant {
+                ts,
+                text: joined_text(Some(parts), "text"),
+                tokens: [
+                    "input_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                    "output_tokens",
+                ]
+                .iter()
+                .filter_map(|key| usage?.get(key)?.as_u64())
+                .sum(),
+                cost: 0.0,
+                message: str_at(message, "id").unwrap_or_default().to_string(),
+            });
+            events
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// A typed prompt. Slash commands, their output and interruption notices are not prompts.
+fn claude_prompt(ts: i64, text: &str) -> Vec<Event> {
+    let start = text.trim_start();
+    if start.is_empty()
+        || ["<command-", "<local-command-", "[Request interrupted"]
+            .iter()
+            .any(|prefix| start.starts_with(prefix))
+    {
+        return Vec::new();
+    }
+    vec![Event::User {
+        ts,
+        text: text.to_string(),
+    }]
+}
+
+/// True when the output has a send CLI's own error: a `tern run:` / `tern send:` line, or a line
+/// that is hc's JSON error (`{"error":{"kind","message","hint"}}`).
+fn send_error(output: &str) -> bool {
+    output.contains("tern run: ")
+        || output.contains("tern send: ")
+        || output.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with('{')
+                && serde_json::from_str::<Value>(line)
+                    .is_ok_and(|value| value.get("error").is_some_and(Value::is_object))
+        })
 }
 
 fn todo(entry: &Value) -> Option<Event> {
@@ -538,6 +655,59 @@ mod tests {
             matches!(&events[1], Event::ToolCall { args, .. } if args["path"] == "agent://Main")
         );
         assert!(matches!(events[2], Event::Assistant { tokens: 10, .. }));
+    }
+
+    #[test]
+    fn reads_claude_code_entries() {
+        let at = "2026-11-15T09:32:31.036Z";
+        let ts = timestamp(&json!({"timestamp": at}));
+        let entry = |value: Value| {
+            let mut value = value;
+            value["timestamp"] = json!(at);
+            parse(&value)
+        };
+        assert_eq!(
+            entry(
+                json!({"type": "user", "message": {"role": "user", "content": "send hi to t1t"}})
+            ),
+            vec![Event::User {
+                ts,
+                text: "send hi to t1t".into()
+            }]
+        );
+        for skipped in [
+            json!({"type": "user", "message": {"content": "<command-name>/clear</command-name>"}}),
+            json!({"type": "user", "isMeta": true, "message": {"content": "Caveat: …"}}),
+            json!({"type": "user", "isSidechain": true, "message": {"content": "subagent task"}}),
+            json!({"type": "user", "message": {"content": [{"type": "text", "text": "[Request interrupted by user]"}]}}),
+        ] {
+            assert_eq!(entry(skipped.clone()), vec![], "{skipped}");
+        }
+        let results = entry(json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "u1", "is_error": true,
+             "content": "Exit code 3\n{\"error\":{\"hint\":\"see `hc ls --all`\",\"kind\":\"not_found\",\"message\":\"no terminal \\\"t9\\\"\"}}"},
+            {"type": "tool_result", "tool_use_id": "u2", "content": [{"type": "text", "text": "ok"}]}
+        ]}}));
+        assert!(matches!(&results[..], [
+            Event::ToolResult { id: a, error: true, send_error: true, .. },
+            Event::ToolResult { id: b, error: false, send_error: false, .. },
+        ] if a == "u1" && b == "u2"));
+        let assistant = entry(json!({"type": "assistant", "message": {
+            "id": "msg_1", "model": "claude-opus-5-5",
+            "content": [{"type": "tool_use", "id": "u1", "name": "Bash",
+                         "input": {"command": "hc send t2 hi", "description": "Greet t2"}}],
+            "usage": {"input_tokens": 2, "cache_creation_input_tokens": 30,
+                      "cache_read_input_tokens": 500, "output_tokens": 8}
+        }}));
+        assert!(
+            matches!(&assistant[0], Event::ToolCall { name, intent, args, .. }
+            if name == "Bash" && intent == "Greet t2" && args["command"] == "hc send t2 hi")
+        );
+        assert_eq!(assistant[1], Event::Model("claude-opus-5-5".into()));
+        assert!(
+            matches!(&assistant[2], Event::Assistant { tokens: 540, message, .. }
+            if message == "msg_1")
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Which multiplexer muster reads: Tern (panes and omp transcripts, so agents and messages) or
-//! herdr (hc terminals, so agents only).
+//! Which multiplexer muster reads: Tern (panes and omp transcripts) or herdr (hc terminals, and
+//! the transcripts of local Claude Code terminals).
 
 use std::any::Any;
 use std::process::{Command, Stdio};
@@ -88,7 +88,7 @@ impl Backend {
                 },
                 tx,
             )),
-            Backend::Herdr { hc, .. } => Box::new(herdr::spawn(hc.clone(), tx)),
+            Backend::Herdr { hc, .. } => Box::new(herdr::spawn(hc.clone(), history, tx)),
         }
     }
 }

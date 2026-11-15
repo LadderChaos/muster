@@ -1,5 +1,6 @@
 //! Reads herdr-core's terminals through `hc events`: agents, the state they report over OSC 7501,
-//! and which agent started which. hc carries no message text, so this backend shows agents only.
+//! and which agent started which. hc carries no message text; local Claude Code terminals'
+//! transcripts supply their messages (see `claude`).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::claude::{self, Follower};
 use crate::model::PaneId;
 use crate::pane::{Pane, agent_cli};
 use crate::source::Update;
@@ -324,6 +326,11 @@ fn pane(terminal: &Value, now_ms: i64) -> Option<Pane> {
         cli: text(&status["app"]).or_else(|| agent_cli(&argv)),
         status: state,
         parent,
+        name: text(&terminal["name"]),
+        pid: foreground["pid"]
+            .as_u64()
+            .filter(|_| machine.is_none())
+            .and_then(|pid| u32::try_from(pid).ok()),
     })
 }
 
@@ -345,13 +352,18 @@ impl Drop for Guard {
     }
 }
 
-/// Follows `hc events` on a thread, reconnecting with backoff, and sends every change as panes.
-pub fn spawn(bin: String, tx: Sender<Update>) -> Guard {
+/// Follows `hc events` on a thread, reconnecting with backoff, and sends every change as panes,
+/// followed by new transcript events of local Claude Code terminals.
+pub fn spawn(bin: String, history: u64, tx: Sender<Update>) -> Guard {
     let stop = Arc::new(AtomicBool::new(false));
     let child = Arc::new(Mutex::new(None));
     let worker = {
         let (stop, child) = (Arc::clone(&stop), Arc::clone(&child));
-        thread::spawn(move || run(&bin, &tx, &stop, &child))
+        thread::spawn(move || {
+            let follower = Arc::new(Mutex::new(Follower::new(history)));
+            let _watcher = claude::watch(&follower, tx.clone());
+            run(&bin, &tx, &follower, &stop, &child)
+        })
     };
     Guard {
         stop,
@@ -367,12 +379,18 @@ enum End {
     Failed(String),
 }
 
-fn run(bin: &str, tx: &Sender<Update>, stop: &AtomicBool, slot: &Mutex<Option<Child>>) {
+fn run(
+    bin: &str,
+    tx: &Sender<Update>,
+    follower: &Mutex<Follower>,
+    stop: &AtomicBool,
+    slot: &Mutex<Option<Child>>,
+) {
     let mut baseline = false;
     let mut backoff = RETRY_MIN;
     while !stop.load(Ordering::SeqCst) {
         let started = Instant::now();
-        match follow(bin, tx, stop, slot, &mut baseline) {
+        match follow(bin, tx, follower, stop, slot, &mut baseline) {
             End::Closed => return,
             End::Resubscribe => continue,
             End::Failed(message) => {
@@ -399,6 +417,7 @@ fn run(bin: &str, tx: &Sender<Update>, stop: &AtomicBool, slot: &Mutex<Option<Ch
 fn follow(
     bin: &str,
     tx: &Sender<Update>,
+    follower: &Mutex<Follower>,
     stop: &AtomicBool,
     slot: &Mutex<Option<Child>>,
     baseline: &mut bool,
@@ -429,7 +448,7 @@ fn follow(
     let end = if stop.load(Ordering::SeqCst) {
         End::Closed
     } else {
-        read(stdout, tx, baseline)
+        read(stdout, tx, follower, baseline)
     };
     if let Some(mut child) = slot.lock().unwrap().take() {
         let _ = child.kill();
@@ -448,7 +467,12 @@ fn follow(
     }
 }
 
-fn read(stdout: impl Read, tx: &Sender<Update>, baseline: &mut bool) -> End {
+fn read(
+    stdout: impl Read,
+    tx: &Sender<Update>,
+    follower: &Mutex<Follower>,
+    baseline: &mut bool,
+) -> End {
     let mut terminals = Terminals::default();
     for line in BufReader::new(stdout).split(b'\n') {
         let Ok(line) = line else { break };
@@ -459,9 +483,12 @@ fn read(stdout: impl Read, tx: &Sender<Update>, baseline: &mut bool) -> End {
             Applied::Unchanged => {}
             Applied::Resubscribe => return End::Resubscribe,
             Applied::Changed => {
-                if tx.send(Update::Panes(terminals.panes(now_ms()))).is_err() {
+                let mut follower = follower.lock().unwrap();
+                let (panes, batch) = follower.panes(terminals.panes(now_ms()));
+                if !claude::send(tx, Some(panes), batch) {
                     return End::Closed;
                 }
+                drop(follower);
                 if !*baseline {
                     *baseline = true;
                     if tx.send(Update::Baseline).is_err() {

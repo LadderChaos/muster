@@ -499,7 +499,7 @@ struct MusterView: View {
         return ScrollView(.horizontal) {
             HStack(spacing: 6) {
                 messageMenu(roster)
-                if store.backend != .herdr { liveChip }
+                liveChip
                 ForEach(chips) { conversationChip($0, roster, shown: $0.id == shown?.id) }
             }
             .padding(.vertical, 1)
@@ -704,8 +704,8 @@ struct MusterView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// herdr reports no message text, so the open notch lists its agents instead, each under the agent
-    /// that started it, with the state it reports.
+    /// Until a herdr conversation exists, the open notch lists its agents, each under the agent that
+    /// started it, with the state it reports.
     private func teamView(_ roster: MusterRoster) -> some View {
         let rows = TeamRow.rows(roster.active + roster.idle)
         return VStack(alignment: .leading, spacing: 6) {
@@ -713,7 +713,7 @@ struct MusterView: View {
                 sectionLabel("herdr agents")
                 countBadge(rows.count, color: musterAccent)
                 Spacer(minLength: 6)
-                Text("herdr reports state, not messages")
+                Text("Messages show for local Claude Code agents")
                     .font(.pixel())
                     .foregroundStyle(Color.white.opacity(0.35))
                     .lineLimit(1)
@@ -756,31 +756,37 @@ struct MusterView: View {
         .accessibilityLabel("\(agentName(agent)), \(state)\(depth > 0 ? ", started by the agent above" : "")")
     }
 
-    /// Who started this herdr agent, and whom it started.
+    /// Who started this herdr agent, and whom it started; and whether its messages can show.
+    @ViewBuilder
     private func teamLinks(_ agent: MusterAgent, _ roster: MusterRoster) -> some View {
         let children = store.agents.filter { $0.parent == agent.pane }
-        return VStack(alignment: .leading, spacing: 6) {
-            if let parent = agent.parent, roster.agent(parent) != nil {
-                HStack(spacing: 6) {
-                    sectionLabel("Started by")
-                    jumpButton(parent, roster, role: "parent")
-                }
-            }
-            if !children.isEmpty {
-                HStack(spacing: 6) {
-                    sectionLabel("Started")
-                    countBadge(children.count, color: agentHue(agent.pane))
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 6) {
-                            ForEach(children) { jumpButton($0.pane, roster, role: "child") }
-                        }
+        let parent = agent.parent.flatMap { roster.agent($0) }
+        if parent != nil || !children.isEmpty || !agent.transcript {
+            VStack(alignment: .leading, spacing: 6) {
+                if let parent = parent {
+                    HStack(spacing: 6) {
+                        sectionLabel("Started by")
+                        jumpButton(parent.pane, roster, role: "parent")
                     }
-                    .scrollIndicators(.never)
+                }
+                if !children.isEmpty {
+                    HStack(spacing: 6) {
+                        sectionLabel("Started")
+                        countBadge(children.count, color: agentHue(agent.pane))
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 6) {
+                                ForEach(children) { jumpButton($0.pane, roster, role: "child") }
+                            }
+                        }
+                        .scrollIndicators(.never)
+                    }
+                }
+                if !agent.transcript {
+                    Text("Not a local Claude Code agent: only messages sent to it by one show, and their delivery is unknown.")
+                        .font(.pixel())
+                        .foregroundStyle(Color.white.opacity(0.4))
                 }
             }
-            Text("herdr reports this agent's state, not its messages.")
-                .font(.pixel())
-                .foregroundStyle(Color.white.opacity(0.4))
         }
     }
 
@@ -1007,17 +1013,13 @@ struct MusterView: View {
                 .textSelection(.enabled)
                 .help(agent.cwd)
             Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
-            if store.backend == .herdr {
-                teamLinks(agent, roster)
+            if store.backend == .herdr { teamLinks(agent, roster) }
+            HStack(spacing: 6) {
+                sectionLabel("Exchanges")
+                countBadge(related.count, color: hue)
                 Spacer(minLength: 0)
-            } else {
-                HStack(spacing: 6) {
-                    sectionLabel("Exchanges")
-                    countBadge(related.count, color: hue)
-                    Spacer(minLength: 0)
-                }
-                exchangeList(related, roster, empty: "No exchanges with \(agentName(agent)) yet.")
             }
+            exchangeList(related, roster, empty: "No exchanges with \(agentName(agent)) yet.")
             composer(agent, hue: hue)
         }
     }

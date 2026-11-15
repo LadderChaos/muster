@@ -20,6 +20,7 @@ pub struct Pane {
     pub quiet_ms: u64,
     /// When `quiet_ms` was sampled; age keeps advancing without querying the backend.
     pub inspected_at: Option<Instant>,
+    /// The agent's transcript: omp's session file in Tern, Claude Code's for a local herdr terminal.
     pub session_file: Option<PathBuf>,
     /// The agent CLI in the pane (`codex`, `claude`, `codex (acp)`, …) when it has no omp
     /// transcript: Tern's foreground process, or the app a herdr terminal reports.
@@ -28,6 +29,10 @@ pub struct Pane {
     pub status: Option<String>,
     /// The herdr terminal that started this one with `hc run`.
     pub parent: Option<PaneId>,
+    /// The herdr terminal's name (`hc run --name`), which `hc send` also accepts.
+    pub name: Option<String>,
+    /// The herdr terminal's foreground process, used to find a Claude Code session.
+    pub pid: Option<u32>,
 }
 
 impl Pane {
