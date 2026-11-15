@@ -59,13 +59,14 @@ fn session_file(config: &Path, pid: u32) -> Option<PathBuf> {
 pub type Batch = Vec<(PaneId, Vec<Event>)>;
 
 /// The Claude Code transcripts of the current terminals, each read from where the last read
-/// stopped.
+/// stopped. A transcript keeps its read position after its process exits, so a `claude --resume`
+/// of the same session, or `/resume` back to it, reads only what is new.
 pub struct Follower {
     config: Option<PathBuf>,
     history: u64,
     /// The last terminals from hc, with transcripts attached.
     panes: Vec<Pane>,
-    tails: HashMap<PaneId, Tail>,
+    tails: HashMap<PathBuf, Tail>,
 }
 
 impl Follower {
@@ -101,15 +102,23 @@ impl Follower {
         Some(self.panes(panes))
     }
 
-    /// Reads the transcripts among `paths`.
+    /// Reads the transcripts among `paths` that belong to a current terminal. Others keep their
+    /// appends until a terminal shows them again.
     pub fn changed(&mut self, paths: &[PathBuf]) -> Batch {
         let mut batch = Vec::new();
-        for (pane, tail) in &mut self.tails {
-            if paths
+        for (file, tail) in &mut self.tails {
+            if !paths
                 .iter()
-                .any(|path| path.file_name() == tail.path.file_name())
+                .any(|path| path.file_name() == file.file_name())
             {
-                read(&mut batch, *pane, tail);
+                continue;
+            }
+            if let Some(pane) = self
+                .panes
+                .iter()
+                .find(|p| p.session_file.as_ref() == Some(file))
+            {
+                read(&mut batch, pane.id, tail);
             }
         }
         batch
@@ -122,21 +131,26 @@ impl Follower {
         }
     }
 
+    /// Reads each shown transcript: its history the first time, then whatever was added while no
+    /// terminal showed it.
     fn sync(&mut self, panes: &[Pane]) -> Batch {
-        self.tails.retain(|id, tail| {
-            panes
-                .iter()
-                .any(|pane| pane.id == *id && pane.session_file.as_ref() == Some(&tail.path))
-        });
         let mut batch = Vec::new();
         for pane in panes {
             let Some(file) = &pane.session_file else {
                 continue;
             };
-            if !self.tails.contains_key(&pane.id) {
-                let mut tail = Tail::new(file.clone(), self.history);
-                read(&mut batch, pane.id, &mut tail);
-                self.tails.insert(pane.id, tail);
+            let shown = self
+                .panes
+                .iter()
+                .any(|p| p.session_file.as_ref() == Some(file));
+            let history = self.history;
+            let tail = self
+                .tails
+                .entry(file.clone())
+                .or_insert_with(|| Tail::new(file.clone(), history));
+            // A transcript already shown is read by the file watcher.
+            if !shown {
+                read(&mut batch, pane.id, tail);
             }
         }
         batch
@@ -218,6 +232,69 @@ mod tests {
         std::fs::write(short.join("abc-1.jsonl"), "").unwrap();
         assert_eq!(session_file(&config, 42), Some(short.join("abc-1.jsonl")));
         assert_eq!(session_file(&config, 7), None);
+        std::fs::remove_dir_all(&config).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_session_reads_only_what_was_added_while_its_process_was_gone() {
+        let config = std::env::temp_dir().join(format!("muster-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        std::fs::create_dir_all(config.join("projects/-x")).unwrap();
+        let record = |pid: u32| {
+            std::fs::write(
+                config.join(format!("sessions/{pid}.json")),
+                r#"{"sessionId":"s","cwd":"/x"}"#,
+            )
+            .unwrap()
+        };
+        let transcript = config.join("projects/-x/s.jsonl");
+        let turn = |uuid: &str| {
+            format!(
+                "{{\"type\":\"user\",\"uuid\":\"{uuid}\",\"timestamp\":\"2026-11-16T00:00:00Z\",\
+                 \"message\":{{\"content\":\"prompt {uuid}\"}}}}\n"
+            )
+        };
+        std::fs::write(&transcript, turn("a")).unwrap();
+        let pane = |pid: u32| Pane {
+            id: 9,
+            pid: Some(pid),
+            ..Pane::default()
+        };
+        let mut follower = Follower {
+            config: Some(config.clone()),
+            history: 1 << 20,
+            panes: Vec::new(),
+            tails: HashMap::new(),
+        };
+        let texts = |batch: Batch| -> Vec<String> {
+            batch
+                .into_iter()
+                .flat_map(|(_, events)| events)
+                .filter_map(|event| match event {
+                    Event::User { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        record(1);
+        assert_eq!(texts(follower.panes(vec![pane(1)]).1), ["prompt a"]);
+        // The process exits; its record goes, and the session gains a turn meanwhile.
+        std::fs::remove_file(config.join("sessions/1.json")).unwrap();
+        assert!(follower.panes(vec![pane(1)]).1.is_empty());
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, turn("b").as_bytes()).unwrap();
+        assert!(
+            follower
+                .changed(std::slice::from_ref(&transcript))
+                .is_empty()
+        );
+        // `claude --resume` of the same session, under a new process.
+        record(2);
+        assert_eq!(texts(follower.panes(vec![pane(2)]).1), ["prompt b"]);
         std::fs::remove_dir_all(&config).unwrap();
     }
 }

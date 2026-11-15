@@ -18,7 +18,8 @@ pub struct Tail {
     started: bool,
     history: u64,
     partial: Vec<u8>,
-    /// Entry IDs remain stable when omp rewrites a transcript; offsets and inodes do not.
+    /// Entry IDs (omp's `id`, Claude Code's `uuid`) remain stable when a transcript is rewritten;
+    /// offsets and inodes do not.
     seen: HashSet<String>,
     #[cfg(unix)]
     identity: Option<(u64, u64)>,
@@ -92,6 +93,7 @@ impl Tail {
             .filter(|entry| {
                 let Some(id) = entry
                     .get("id")
+                    .or_else(|| entry.get("uuid"))
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty())
                 else {
