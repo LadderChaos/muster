@@ -2,8 +2,8 @@
 
 A live terminal map of coding agents and orchestration traffic in Stencil's Tern
 or a herdr window. Uses the official `tern` CLI and local omp transcripts, or
-herdr-core's `hc` and local Claude Code transcripts. No plugin or relay service is
-required.
+herdr-core's `hc` and local Claude Code and Codex transcripts. No plugin or relay
+service is required.
 
 ![muster showing four omp agents: a lead sends tasks to API, web and docs agents, and their replies arrive in the message feed](assets/muster.png)
 
@@ -56,17 +56,35 @@ between events.
 With `--backend herdr`, muster reads a persistent `hc events --json`
 subscription. It shows each terminal that runs an agent, the state the agent
 reports (`working`, `idle`, `blocked`, `done` or `error`) and which agent started
-which. hc reports no message text, so for a local terminal that runs Claude Code,
-muster finds the process's transcript through `~/.claude/sessions/<pid>.json`
-(or `$CLAUDE_CONFIG_DIR`) and reads its turns, tools, model and tokens. A message
-is sent when a transcript records an `hc send <terminal> <text>` call, and
-delivered when the recipient's transcript records the `<hc from="…">` turn hc
-typed, or a turn with exactly the sent text. Messages between other agents, and
-any message of a remote terminal, do not show. Addresses are hc terminal
-addresses, such as `t7` or `vps/t7` for a remote core; `hc send` targets given as
-terminal names resolve to live terminals of that name. `m` and `--send` use
-`hc send`; Enter and `--focus` use `herdr-app` and need the Herdr window to be
-open.
+which. hc reports no message text, so for a local terminal that runs Claude Code
+or Codex, muster finds the process's transcript and reads its turns, tools, model
+and tokens:
+
+- **Claude Code** records each process in `~/.claude/sessions/<pid>.json` (or
+  `$CLAUDE_CONFIG_DIR`), which names its session.
+- **Codex** records no process: its terminal UI is a client of a shared
+  app-server that runs every session. Its transcripts are
+  `~/.codex/sessions/…/rollout-…-<session>.jsonl` (or `$CODEX_HOME`), and each
+  one's first line names the session's folder, start time and client. A terminal
+  that runs `codex resume <session>` gets that session. Otherwise it gets the
+  newest session started in the terminal UI, in its folder, since its process
+  started, but only when no other Codex terminal in herdr runs in that folder. Two
+  Codex agents in one folder show only their state, unless each is resumed by
+  session ID. A Codex terminal UI outside herdr in the same folder is not seen and
+  could be taken for the herdr one. Codex keeps its transcript open while it
+  writes, and macOS reports no change to an open file, so muster also reads the
+  shown transcripts every second.
+
+A message is sent when a transcript records an `hc send <terminal> <text>` call,
+and delivered when the recipient's transcript records the `<hc from="…">` turn hc
+typed, or a turn with exactly the sent text. A send fails only when hc reports its
+own error, or when Codex could not start the command. Messages of other agents,
+and any message of a remote terminal, do not show. A transcript keeps its read
+position when its process exits, so a resumed session adds only its new turns.
+Addresses are hc terminal addresses, such as `t7`
+or `vps/t7` for a remote core; `hc send` targets given as terminal names resolve to
+live terminals of that name. `m` and `--send` use `hc send`; Enter and `--focus`
+use `herdr-app` and need the Herdr window to be open.
 
 ## Keys
 

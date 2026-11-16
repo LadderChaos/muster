@@ -31,8 +31,10 @@ pub struct Pane {
     pub parent: Option<PaneId>,
     /// The herdr terminal's name (`hc run --name`), which `hc send` also accepts.
     pub name: Option<String>,
-    /// The herdr terminal's foreground process, used to find a Claude Code session.
+    /// The herdr terminal's foreground process, used to find a Claude Code or Codex session.
     pub pid: Option<u32>,
+    /// The Codex session the terminal's command line resumes (`codex resume <session>`).
+    pub resumed: Option<String>,
 }
 
 impl Pane {

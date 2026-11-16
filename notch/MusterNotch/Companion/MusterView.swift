@@ -713,7 +713,7 @@ struct MusterView: View {
                 sectionLabel("herdr agents")
                 countBadge(rows.count, color: musterAccent)
                 Spacer(minLength: 6)
-                Text("Messages show for local Claude Code agents")
+                Text("Messages show for local Claude Code and Codex agents")
                     .font(.pixel())
                     .foregroundStyle(Color.white.opacity(0.35))
                     .lineLimit(1)
@@ -782,7 +782,7 @@ struct MusterView: View {
                     }
                 }
                 if !agent.transcript {
-                    Text("Not a local Claude Code agent: only messages sent to it by one show, and their delivery is unknown.")
+                    Text("No local Claude Code or Codex transcript: only messages sent to it by such an agent show, and their delivery is unknown.")
                         .font(.pixel())
                         .foregroundStyle(Color.white.opacity(0.4))
                 }

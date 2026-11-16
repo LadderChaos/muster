@@ -1,6 +1,8 @@
 mod app;
 mod backend;
 mod claude;
+mod codex;
+mod follow;
 mod herdr;
 mod model;
 mod pane;
@@ -39,8 +41,8 @@ usage:
 
 With Tern, reads `tern inspect --json` for panes and omp's session transcripts for traffic:
 cross-pane messages (`tern run` / `tern send`), omp IRC, subagent spawns and yields.
-With herdr, reads `hc events` for agents, their reported state and which agent started which;
-herdr reports no message text, so no messages are shown.
+With herdr, reads `hc events` for agents, their reported state and which agent started which,
+and the transcripts of local Claude Code and Codex agents for `hc send` messages between them.
 It never writes to a pane unless you press m and send a message, or use --send.
 
 options:
@@ -231,7 +233,7 @@ fn load(backend: &Backend, history: u64) -> Result<Model> {
     let mut model = Model::default();
     match backend {
         Backend::Herdr { hc, .. } => {
-            let (panes, batch) = claude::Follower::new(history).panes(herdr::terminals(hc)?);
+            let (panes, batch) = follow::Follower::new(history).panes(herdr::terminals(hc)?);
             model.apply_panes(panes);
             for (pane, events) in batch {
                 model.apply(pane, None, events);

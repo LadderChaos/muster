@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::claude::{self, Follower};
+use crate::follow::{self, Follower};
 use crate::model::PaneId;
 use crate::pane::{Pane, agent_cli};
 use crate::source::Update;
@@ -331,6 +331,7 @@ fn pane(terminal: &Value, now_ms: i64) -> Option<Pane> {
             .as_u64()
             .filter(|_| machine.is_none())
             .and_then(|pid| u32::try_from(pid).ok()),
+        resumed: crate::codex::resumed_session(&argv),
     })
 }
 
@@ -361,7 +362,7 @@ pub fn spawn(bin: String, history: u64, tx: Sender<Update>) -> Guard {
         let (stop, child) = (Arc::clone(&stop), Arc::clone(&child));
         thread::spawn(move || {
             let follower = Arc::new(Mutex::new(Follower::new(history)));
-            let _watcher = claude::watch(&follower, tx.clone());
+            let _watcher = follow::watch(&follower, tx.clone());
             run(&bin, &tx, &follower, &stop, &child)
         })
     };
@@ -485,7 +486,7 @@ fn read(
             Applied::Changed => {
                 let mut follower = follower.lock().unwrap();
                 let (panes, batch) = follower.panes(terminals.panes(now_ms()));
-                if !claude::send(tx, Some(panes), batch) {
+                if !follow::send(tx, Some(panes), batch) {
                     return End::Closed;
                 }
                 drop(follower);

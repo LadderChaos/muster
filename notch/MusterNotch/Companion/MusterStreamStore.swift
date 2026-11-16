@@ -8,7 +8,7 @@ struct MusterSnapshot: Decodable {
     let error: String?
 }
 
-/// The window muster reads. herdr carries no message text; the watcher reads local Claude Code transcripts.
+/// The window muster reads. herdr carries no message text; the watcher reads local Claude Code and Codex transcripts.
 enum MusterBackend: String, Decodable {
     case tern
     case herdr

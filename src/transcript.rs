@@ -1,5 +1,6 @@
 //! Tails agent session files and turns their entries into events: omp's
-//! (`~/.omp/agent/sessions/**.jsonl`) and Claude Code's (`~/.claude/projects/*/<session>.jsonl`).
+//! (`~/.omp/agent/sessions/**.jsonl`), Claude Code's (`~/.claude/projects/*/<session>.jsonl`) and
+//! Codex's (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`).
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -154,6 +155,10 @@ pub enum Event {
         done: u32,
         total: u32,
     },
+    /// The session's tokens so far. Codex reports a running total instead of each response's.
+    Usage {
+        total: u64,
+    },
     Exit {
         ts: i64,
     },
@@ -186,6 +191,7 @@ pub fn parse(entry: &Value) -> Vec<Event> {
         },
         "message" => message(entry, ts),
         "user" | "assistant" => claude(entry, ts),
+        "event_msg" | "response_item" | "turn_context" => codex(entry, ts),
         _ => Vec::new(),
     }
 }
@@ -377,6 +383,133 @@ fn send_error(output: &str) -> bool {
                 && serde_json::from_str::<Value>(line)
                     .is_ok_and(|value| value.get("error").is_some_and(Value::is_object))
         })
+}
+
+/// Codex's entries: `event_msg` (typed prompts, commands of the `exec` tool, token totals),
+/// `response_item` (shell calls and their output, replies) and `turn_context` (the model).
+/// Context Codex injects as user messages, such as AGENTS.md, is a `response_item` only, so
+/// prompts come from the `UserMessage` events.
+fn codex(entry: &Value, ts: i64) -> Vec<Event> {
+    let payload = &entry["payload"];
+    let kind = payload["type"].as_str().unwrap_or_default();
+    match (entry["type"].as_str().unwrap_or_default(), kind) {
+        ("turn_context", _) => str_at(payload, "model")
+            .map(|model| vec![Event::Model(model.to_string())])
+            .unwrap_or_default(),
+        ("event_msg", "item_completed") if payload["item"]["type"] == "UserMessage" => {
+            codex_prompt(
+                ts,
+                joined_text(payload["item"]["content"].as_array(), "text"),
+            )
+        }
+        // A command the `exec` JavaScript tool ran. Its ID starts with `exec-`; a completed
+        // command with a `call_` ID repeats a `function_call`, which is read instead. With no
+        // `process_id`, Codex could not start the command, so a send in it did not happen.
+        ("event_msg", "item_completed")
+            if payload["item"]["type"] == "CommandExecution"
+                && str_at(&payload["item"], "id").is_some_and(|id| id.starts_with("exec-")) =>
+        {
+            let item = &payload["item"];
+            let id = str_at(item, "id").unwrap_or_default().to_string();
+            vec![
+                Event::ToolCall {
+                    ts,
+                    id: id.clone(),
+                    name: "shell".into(),
+                    args: serde_json::json!({ "command": item["command"] }),
+                    intent: String::new(),
+                },
+                Event::ToolResult {
+                    ts,
+                    id,
+                    name: String::new(),
+                    error: item["exit_code"].as_i64().is_some_and(|code| code != 0),
+                    send_error: item["process_id"].is_null()
+                        || send_error(str_at(item, "aggregated_output").unwrap_or_default()),
+                    details: Value::Null,
+                },
+            ]
+        }
+        // Older Codex releases.
+        ("event_msg", "user_message") => codex_prompt(
+            ts,
+            str_at(payload, "message").unwrap_or_default().to_string(),
+        ),
+        ("event_msg", "token_count") => payload
+            .pointer("/info/total_token_usage/total_tokens")
+            .and_then(Value::as_u64)
+            .map(|total| vec![Event::Usage { total }])
+            .unwrap_or_default(),
+        ("response_item", "function_call") => {
+            let args = match &payload["arguments"] {
+                Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+                other => other.clone(),
+            };
+            vec![Event::ToolCall {
+                ts,
+                id: str_at(payload, "call_id").unwrap_or_default().to_string(),
+                name: str_at(payload, "name").unwrap_or_default().to_string(),
+                intent: str_at(&args, "justification")
+                    .unwrap_or_default()
+                    .to_string(),
+                args,
+            }]
+        }
+        ("response_item", "function_call_output") => {
+            let (output, code) = codex_output(&payload["output"]);
+            vec![Event::ToolResult {
+                ts,
+                id: str_at(payload, "call_id").unwrap_or_default().to_string(),
+                // Outputs do not name their tool; the model knows it from the call.
+                name: String::new(),
+                error: code.is_some_and(|code| code != 0),
+                send_error: send_error(&output),
+                details: Value::Null,
+            }]
+        }
+        ("response_item", "message") if payload["role"] == "assistant" => {
+            vec![Event::Assistant {
+                ts,
+                text: joined_text(payload["content"].as_array(), "output_text"),
+                tokens: 0,
+                cost: 0.0,
+                message: String::new(),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn codex_prompt(ts: i64, text: String) -> Vec<Event> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    vec![Event::User { ts, text }]
+}
+
+/// A shell call's output and exit code: `Process exited with code N` in the text, or, in older
+/// Codex releases, a JSON string with `output` and `metadata.exit_code`.
+fn codex_output(output: &Value) -> (String, Option<i64>) {
+    let text = match output {
+        Value::String(text) => text.clone(),
+        Value::Object(_) => str_at(output, "content").unwrap_or_default().to_string(),
+        _ => String::new(),
+    };
+    if let Ok(value) = serde_json::from_str::<Value>(&text)
+        && let Some(code) = value.pointer("/metadata/exit_code").and_then(Value::as_i64)
+    {
+        return (
+            str_at(&value, "output").unwrap_or_default().to_string(),
+            Some(code),
+        );
+    }
+    let code = text.lines().find_map(|line| {
+        line.strip_prefix("Process exited with code ")?
+            .trim()
+            .parse()
+            .ok()
+    });
+    (text, code)
 }
 
 fn todo(entry: &Value) -> Option<Event> {
@@ -709,6 +842,117 @@ mod tests {
         assert!(
             matches!(&assistant[2], Event::Assistant { tokens: 540, message, .. }
             if message == "msg_1")
+        );
+    }
+
+    #[test]
+    fn reads_codex_entries() {
+        let at = "2026-11-16T07:35:56.955Z";
+        let ts = timestamp(&json!({"timestamp": at}));
+        let entry = |kind: &str, payload: Value| {
+            parse(&json!({"timestamp": at, "type": kind, "payload": payload}))
+        };
+        // Injected context is a user `response_item` only; the typed prompt is the event.
+        assert_eq!(
+            entry(
+                "response_item",
+                json!({"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "# AGENTS.md instructions"}]})
+            ),
+            vec![]
+        );
+        assert_eq!(
+            entry(
+                "event_msg",
+                json!({"type": "item_completed", "item": {"type": "UserMessage",
+                "content": [{"type": "text", "text": "<hc from=\"t1 lead\">review x</hc>"}]}})
+            ),
+            vec![Event::User {
+                ts,
+                text: "<hc from=\"t1 lead\">review x</hc>".into()
+            }]
+        );
+        assert_eq!(
+            entry(
+                "event_msg",
+                json!({"type": "user_message", "message": "older prompt"})
+            ),
+            vec![Event::User {
+                ts,
+                text: "older prompt".into()
+            }]
+        );
+        assert_eq!(
+            entry("turn_context", json!({"model": "gpt-6.1-sol", "cwd": "/w"})),
+            vec![Event::Model("gpt-6.1-sol".into())]
+        );
+        assert_eq!(
+            entry(
+                "event_msg",
+                json!({"type": "token_count", "info": {
+                "total_token_usage": {"total_tokens": 24766},
+                "last_token_usage": {"total_tokens": 900}}})
+            ),
+            vec![Event::Usage { total: 24766 }]
+        );
+        let call = entry(
+            "response_item",
+            json!({"type": "function_call", "name": "exec_command",
+            "call_id": "c1", "arguments": "{\"cmd\":\"hc send t2 hi\",\"justification\":\"Greet\"}"}),
+        );
+        assert!(
+            matches!(&call[..], [Event::ToolCall { id, name, intent, args, .. }]
+            if id == "c1" && name == "exec_command" && intent == "Greet" && args["cmd"] == "hc send t2 hi")
+        );
+        let failed = entry(
+            "response_item",
+            json!({"type": "function_call_output", "call_id": "c1",
+            "output": "Chunk ID: 1\nWall time: 0.1 seconds\nProcess exited with code 3\nOutput:\n{\"error\":{\"kind\":\"not_found\",\"message\":\"no terminal \\\"t2\\\"\"}}\n"}),
+        );
+        assert!(
+            matches!(&failed[..], [Event::ToolResult { id, error: true, send_error: true, .. }] if id == "c1")
+        );
+        let older = entry(
+            "response_item",
+            json!({"type": "function_call_output", "call_id": "c2",
+            "output": "{\"output\":\"ok\\n\",\"metadata\":{\"exit_code\":0}}"}),
+        );
+        assert!(matches!(
+            &older[..],
+            [Event::ToolResult {
+                error: false,
+                send_error: false,
+                ..
+            }]
+        ));
+        let exec = |id: &str, process: Value, code: i64| {
+            entry(
+                "event_msg",
+                json!({"type": "item_completed", "item": {"type": "CommandExecution", "id": id,
+                "command": ["/bin/zsh", "-lc", "hc send t2 hi"], "exit_code": code,
+                "process_id": process, "aggregated_output": "{\"started\":null}\n"}}),
+            )
+        };
+        assert!(matches!(&exec("exec-1", json!("42"), 0)[..], [
+            Event::ToolCall { id, name, args, .. },
+            Event::ToolResult { id: done, error: false, send_error: false, .. },
+        ] if id == "exec-1" && done == "exec-1" && name == "shell" && args["command"][2] == "hc send t2 hi"));
+        assert!(matches!(
+            &exec("exec-2", Value::Null, -1)[..],
+            [
+                _,
+                Event::ToolResult {
+                    error: true,
+                    send_error: true,
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(exec("call_1", json!("42"), 0), Vec::new());
+        assert!(
+            matches!(&entry("response_item", json!({"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "Sent."}]}))[..],
+            [Event::Assistant { text, tokens: 0, .. }] if text == "Sent.")
         );
     }
 

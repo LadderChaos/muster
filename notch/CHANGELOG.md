@@ -14,6 +14,7 @@
 - The agent headline omits the token count when the stream reports none
 - Stream agents decode `transcript` in place of `omp`: the watcher now also reads Claude Code transcripts of local herdr terminals, so the flag no longer means an omp transcript
 - herdr mode shows conversations, **Live** and the conversation chips, as Tern mode does: the watcher reads the transcripts of Claude Code agents in local herdr terminals. The **HERDR AGENTS** tree shows only until a conversation exists. Agent details list exchanges below Started by and Started; for an agent without a transcript, they say that only messages sent to it show, with delivery unknown. **Subagents** stays hidden in herdr mode
+- herdr mode also shows the messages of Codex agents in local herdr terminals, including sends run through Codex's `exec` tool. The bundled watcher finds a Codex transcript from a `codex resume <session>` command line, or as the newest terminal-UI session in the terminal's folder since its process started, when no other Codex terminal runs in that folder. It reads shown transcripts every second, because macOS reports no change while Codex keeps its transcript open
 - The watcher no longer outlives the app. The app holds a pipe on the watcher's stdin, so the watcher exits even when the app is killed, and stopping, restarting or switching windows ends the watcher's whole process group, including its `tern events` or `hc events` command
 
 ### Added

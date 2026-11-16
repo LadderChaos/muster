@@ -293,14 +293,15 @@ impl Model {
                     false => name,
                 };
                 // A shell call fails for many reasons; only the CLI's own error means the send failed.
-                let failed = if name.eq_ignore_ascii_case("bash") {
-                    send_error
-                } else {
-                    error
-                };
+                let failed = if is_shell(&name) { send_error } else { error };
                 self.tool_result(source, ts, &id, &name, failed, &details)
             }
             Event::IrcIn { .. } => {}
+            Event::Usage { total } => {
+                if matches!(source, Node::Pane(_)) {
+                    self.agent(pane).tokens = total;
+                }
+            }
             Event::Todo { done, total } => {
                 if matches!(source, Node::Pane(_)) {
                     self.agent(pane).todo = Some((done, total)).filter(|(_, total)| *total > 0);
@@ -335,17 +336,14 @@ impl Model {
                 self.agent(pane).subs.entry(sub.clone()).or_default().tool = Some(name.clone())
             }
         }
-        // omp's `bash`, Claude Code's `Bash`.
-        let kind = match name.eq_ignore_ascii_case("bash") {
+        let kind = match is_shell(&name) {
             true => "bash",
             false => name.as_str(),
         };
         match kind {
             "bash" => {
-                let command = args
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let command = shell_command(&args).unwrap_or_default();
+                let command = command.as_ref();
                 for (target, text) in tern_sends(command) {
                     let seq = self.outbound(source.clone(), target, ts, text);
                     self.pending_calls.entry(id.clone()).or_default().push(seq);
@@ -912,7 +910,33 @@ fn event_time(event: &Event) -> Option<i64> {
         | Event::ToolResult { ts, .. }
         | Event::IrcIn { ts, .. }
         | Event::Exit { ts } => Some(*ts).filter(|ts| *ts > 0),
-        Event::Model(_) | Event::Todo { .. } => None,
+        Event::Model(_) | Event::Todo { .. } | Event::Usage { .. } => None,
+    }
+}
+
+/// omp's `bash`, Claude Code's `Bash`, Codex's `exec_command` and older `shell`.
+fn is_shell(name: &str) -> bool {
+    name.eq_ignore_ascii_case("bash") || name == "exec_command" || name == "shell"
+}
+
+/// A shell call's command line: `command` (omp, Claude Code), `cmd` (Codex), or the script of
+/// an older Codex argv such as `["bash", "-lc", "<script>"]`.
+fn shell_command(args: &Value) -> Option<std::borrow::Cow<'_, str>> {
+    if let Some(command) = args.get("command").and_then(Value::as_str) {
+        return Some(command.into());
+    }
+    if let Some(command) = args.get("cmd").and_then(Value::as_str) {
+        return Some(command.into());
+    }
+    let argv: Vec<&str> = args
+        .get("command")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    match argv.as_slice() {
+        [_, flag, script] if flag.ends_with('c') && flag.starts_with('-') => Some((*script).into()),
+        _ => Some(argv.join(" ").into()),
     }
 }
 
@@ -1341,6 +1365,68 @@ line' ; tern run $TERN_PANE "self" ; tern send 7 keys enter ; tern run SDK "by t
             model.agents[&review].last_user,
             Some((2_000, "run the tests".to_string()))
         );
+    }
+
+    #[test]
+    fn codex_shell_calls_send_and_only_hcs_error_fails_them() {
+        let mut model = Model::default();
+        let (lead, review) = herdr_panes(&mut model);
+        let call = |id: &str, args: Value| Event::ToolCall {
+            ts: 1_000,
+            id: id.into(),
+            name: if args.get("cmd").is_some() {
+                "exec_command"
+            } else {
+                "shell"
+            }
+            .into(),
+            args,
+            intent: String::new(),
+        };
+        let result = |id: &str, error: bool, send_error: bool| Event::ToolResult {
+            ts: 1_100,
+            id: id.into(),
+            name: String::new(),
+            error,
+            send_error,
+            details: Value::Null,
+        };
+        model.apply(
+            lead,
+            None,
+            vec![
+                call(
+                    "a",
+                    serde_json::json!({"cmd": "hc send review 'one'; grep -c x /dev/null"}),
+                ),
+                call("b", serde_json::json!({"cmd": "hc send t9 two"})),
+                call(
+                    "c",
+                    serde_json::json!({"command": ["bash", "-lc", "hc send t2 three"]}),
+                ),
+                result("a", true, false),
+                result("b", true, true),
+            ],
+        );
+        let sends: Vec<_> = model
+            .messages
+            .iter()
+            .map(|m| (m.text.as_str(), m.to == Node::Pane(review), m.failed))
+            .collect();
+        assert_eq!(
+            sends,
+            vec![
+                ("one", true, false),
+                ("two", false, true),
+                ("three", true, false)
+            ]
+        );
+        model.apply(
+            lead,
+            None,
+            vec![Event::Usage { total: 500 }, Event::Usage { total: 900 }],
+        );
+        assert_eq!(model.agents[&lead].tokens, 900);
     }
 
     #[test]
