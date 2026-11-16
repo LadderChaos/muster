@@ -51,7 +51,7 @@ impl Follower {
     }
 
     /// Looks up the transcripts again after an agent changed its session records (Claude Code's
-    /// `/clear` and `/resume`, a Codex hook record, a new Codex transcript). `None` when no
+    /// `/clear` and `/resume`, a new Codex transcript). `None` when no
     /// terminal's transcript changed.
     pub fn refresh(&mut self) -> Option<(Vec<Pane>, Batch)> {
         let mut panes = self.panes.clone();
