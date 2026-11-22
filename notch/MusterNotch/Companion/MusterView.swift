@@ -553,9 +553,10 @@ struct MusterView: View {
     }
 
     /// Recipient rows, working agents first; closed panes are listed but cannot be chosen.
+    /// Orca mail the notch sent comes from `muster`, which is the person, not an agent.
     /// Choosing one opens its detail with the composer focused.
     private func recipientList(_ roster: MusterRoster) -> some View {
-        let agents = roster.active + roster.idle
+        let agents = (roster.active + roster.idle).filter { $0.address != "muster" }
         return VStack(alignment: .leading, spacing: 6) {
             Text("MESSAGE WHICH AGENT?").font(.pixel()).foregroundStyle(Color.white.opacity(0.45))
             ScrollView {

@@ -66,23 +66,25 @@ pub fn focus(bin: &str, handle: &str) -> Result<()> {
     run(bin, &["terminal", "switch", "--terminal", handle, "--json"])
 }
 
+/// The sender of mail muster sends from outside an Orca terminal. Orca keeps no mailbox for
+/// it, so an agent cannot reply by mail; the subject says so.
+const SENDER: &str = "muster";
+const SENDER_SUBJECT: &str = "from muster: reply in your terminal, not by mail";
+
 /// Sends Orca mail to the agent in the terminal. Orca tells the agent to check its mail; it
-/// never types the text into the terminal.
+/// never types the text into the terminal. Inside an Orca terminal the mail comes from that
+/// terminal. Elsewhere, as in Muster Notch, it comes from `muster`: Orca would otherwise guess
+/// the sender from the working folder, and could pick another agent's terminal.
 pub fn send(bin: &str, handle: &str, text: &str) -> Result<()> {
-    run(
-        bin,
-        &[
-            "orchestration",
-            "send",
-            "--to",
-            handle,
-            "--subject",
-            "muster",
-            "--body",
-            text,
-            "--json",
-        ],
-    )
+    let inside = std::env::var_os("ORCA_TERMINAL_HANDLE").is_some_and(|h| !h.is_empty());
+    let mut args = vec!["orchestration", "send", "--to", handle];
+    if inside {
+        args.extend(["--subject", "muster"]);
+    } else {
+        args.extend(["--from", SENDER, "--subject", SENDER_SUBJECT]);
+    }
+    args.extend(["--body", text, "--json"]);
+    run(bin, &args)
 }
 
 fn run(bin: &str, args: &[&str]) -> Result<()> {
@@ -291,6 +293,7 @@ fn mail(inbox: &Value, reads: &mut Reads, now: i64) -> Vec<Mail> {
                     ts,
                     id: id.clone(),
                     to: self::id(to),
+                    handles: [from.to_string(), to.to_string()],
                     text: m["body"].as_str().unwrap_or_default().to_string(),
                     delivered,
                     thread: m["thread_id"].as_str().map(str::to_string),
@@ -503,6 +506,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn mail_from_outside_orca_is_named_by_its_sender() {
+        let inbox = json!({"messages": [
+            {"id": "m1", "sequence": 1, "from_handle": "muster", "to_handle": "term_527ede88",
+             "body": "hi", "read": 0, "created_at": "2026-11-22T01:25:05Z"},
+        ]});
+        let mut model = crate::model::Model::default();
+        for m in mail(&inbox, &mut Reads::default(), 9_000) {
+            model.apply(m.from, None, vec![m.event]);
+        }
+        let name = |handle| model.name(&crate::model::Node::Pane(id(handle)));
+        assert_eq!(name("muster"), "muster");
+        assert_eq!(name("term_527ede88"), "term 527e");
     }
 
     #[test]

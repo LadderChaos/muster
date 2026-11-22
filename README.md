@@ -101,10 +101,15 @@ sent when Orca stores it, and delivered when the recipient reads it with
 `orca orchestration check`; Orca records no time for the read, so muster dates it
 when it first sees it. A reply (`orca orchestration reply`) is linked to its mail.
 Messages typed into a terminal with `orca terminal send` do not show. Addresses are
-terminal handles (`term_…`). `m` and `--send` send Orca mail with
+terminal handles (`term_…`); a closed terminal shows as `term` and the first four
+characters of its handle. `m` and `--send` send Orca mail with
 `orca orchestration send`; Enter and `--focus` use `orca terminal switch`. Each
-uses the `orca` CLI once (`ORCA_BIN`, else `orca` on `PATH`, else Orca.app's),
-and the mail comes from the terminal that runs muster, as for any `orca` command.
+uses the `orca` CLI once (`ORCA_BIN`, else `orca` on `PATH`, else Orca.app's).
+Run in an Orca terminal, muster sends mail from that terminal. Run elsewhere, as
+in Muster Notch, it sends from `muster`, because Orca would otherwise guess the
+sender from the working folder and could pick another agent's terminal. Orca keeps
+no mailbox for `muster`, so an agent cannot reply by mail; the mail's subject asks
+it to reply in its terminal.
 
 An agent's state comes from `orca agent list`. An agent that runs in the
 background, in a workspace with no open tab in Orca's window, shows with its CLI

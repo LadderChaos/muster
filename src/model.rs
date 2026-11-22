@@ -308,10 +308,11 @@ impl Model {
                 ts,
                 id,
                 to,
+                handles,
                 text,
                 delivered,
                 thread,
-            } => self.mail(pane, ts, id, to, text, delivered, thread),
+            } => self.mail(pane, ts, id, to, handles, text, delivered, thread),
             Event::Usage { total } => {
                 if matches!(source, Node::Pane(_)) {
                     self.agent(pane).tokens = total;
@@ -870,7 +871,8 @@ impl Model {
     }
 
     /// Records Orca mail `from` sent, or marks a recorded one delivered once it is read. A reply
-    /// names its original mail, so no time window is needed to link them.
+    /// names its original mail, so no time window is needed to link them. A sender or recipient
+    /// that is not live is named from its handle: a closed terminal, or `muster` itself.
     #[allow(clippy::too_many_arguments)]
     fn mail(
         &mut self,
@@ -878,10 +880,18 @@ impl Model {
         ts: i64,
         id: String,
         to: PaneId,
+        handles: [String; 2],
         text: String,
         delivered: Option<i64>,
         thread: Option<String>,
     ) {
+        for (pane, handle) in [from, to].into_iter().zip(&handles) {
+            let name = match handle.strip_prefix("term_") {
+                Some(rest) => format!("term {}", rest.chars().take(4).collect::<String>()),
+                None => handle.clone(),
+            };
+            self.name_unseen(pane, handle, Some(name));
+        }
         if let Some(&seq) = self.mail.get(&id) {
             let live = self.live;
             if let Some(at) = delivered

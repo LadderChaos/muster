@@ -168,6 +168,8 @@ pub enum Event {
         ts: i64,
         id: String,
         to: u64,
+        /// Orca's handles of the sender and recipient, to name ones that are not live.
+        handles: [String; 2],
         text: String,
         delivered: Option<i64>,
         thread: Option<String>,
