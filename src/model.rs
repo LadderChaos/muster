@@ -114,9 +114,14 @@ impl Agent {
         self.has_transcript() || self.pane.cli.is_some()
     }
 
-    /// Delivery to this pane is observable only through an omp transcript.
+    /// Whether the pane's agent writes a transcript muster reads.
     pub fn has_transcript(&self) -> bool {
         self.pane.session_file.is_some()
+    }
+
+    /// Delivery to this pane is observable: through its transcript, or Orca's read mark.
+    pub fn delivery_observable(&self) -> bool {
+        self.has_transcript() || self.pane.mailbox
     }
 
     /// The tool this agent is running now, with omp's intent line.
@@ -188,6 +193,8 @@ pub struct Model {
     next_seq: u64,
     /// Prompts with no sender tag, by recipient, until a send with the same text claims them.
     untagged: Vec<(PaneId, i64, String)>,
+    /// Orca mail ID → message, to mark it delivered once read.
+    mail: HashMap<String, u64>,
 }
 
 impl Model {
@@ -297,6 +304,14 @@ impl Model {
                 self.tool_result(source, ts, &id, &name, failed, &details)
             }
             Event::IrcIn { .. } => {}
+            Event::Mail {
+                ts,
+                id,
+                to,
+                text,
+                delivered,
+                thread,
+            } => self.mail(pane, ts, id, to, text, delivered, thread),
             Event::Usage { total } => {
                 if matches!(source, Node::Pane(_)) {
                     self.agent(pane).tokens = total;
@@ -854,6 +869,54 @@ impl Model {
         }
     }
 
+    /// Records Orca mail `from` sent, or marks a recorded one delivered once it is read. A reply
+    /// names its original mail, so no time window is needed to link them.
+    #[allow(clippy::too_many_arguments)]
+    fn mail(
+        &mut self,
+        from: PaneId,
+        ts: i64,
+        id: String,
+        to: PaneId,
+        text: String,
+        delivered: Option<i64>,
+        thread: Option<String>,
+    ) {
+        if let Some(&seq) = self.mail.get(&id) {
+            let live = self.live;
+            if let Some(at) = delivered
+                && let Some(m) = self.messages.iter_mut().find(|m| m.seq == seq)
+                && m.delivered.is_none()
+            {
+                m.delivered = Some(at);
+                if live {
+                    self.changes.push(Change::Delivered(seq));
+                }
+            }
+            return;
+        }
+        let seq = self.record(
+            Kind::Pane,
+            Node::Pane(from),
+            Node::Pane(to),
+            text,
+            Some(ts),
+            delivered,
+            None,
+        );
+        self.mail.insert(id, seq);
+        let Some(original) = thread.and_then(|t| self.mail.get(&t).copied()) else {
+            return;
+        };
+        for m in &mut self.messages {
+            if m.seq == original {
+                m.replied = true;
+            } else if m.seq == seq {
+                m.reply_to = Some(original);
+            }
+        }
+    }
+
     fn agent(&mut self, pane: PaneId) -> &mut Agent {
         self.agents.entry(pane).or_insert_with(|| Agent {
             pane: Pane {
@@ -909,6 +972,7 @@ fn event_time(event: &Event) -> Option<i64> {
         | Event::ToolCall { ts, .. }
         | Event::ToolResult { ts, .. }
         | Event::IrcIn { ts, .. }
+        | Event::Mail { ts, .. }
         | Event::Exit { ts } => Some(*ts).filter(|ts| *ts > 0),
         Event::Model(_) | Event::Todo { .. } | Event::Usage { .. } => None,
     }

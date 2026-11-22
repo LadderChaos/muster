@@ -8,16 +8,32 @@ struct MusterSnapshot: Decodable {
     let error: String?
 }
 
-/// The window muster reads. herdr carries no message text; the watcher reads local Claude Code and Codex transcripts.
+/// The window muster reads. herdr carries no message text, so the watcher reads local Claude Code and Codex transcripts; Orca records its agents' mail itself.
 enum MusterBackend: String, Decodable {
     case tern
     case herdr
+    case orca
 
     var title: String { rawValue.uppercased() }
-    var name: String { self == .tern ? "Tern" : "herdr" }
+    var name: String {
+        switch self {
+        case .tern: "Tern"
+        case .herdr: "herdr"
+        case .orca: "Orca"
+        }
+    }
     /// What the window calls one of its terminals.
     var paneWord: String { self == .tern ? "pane" : "terminal" }
-    var other: MusterBackend { self == .tern ? .herdr : .tern }
+    /// The window a click on the header's name switches to.
+    var next: MusterBackend {
+        switch self {
+        case .tern: .herdr
+        case .herdr: .orca
+        case .orca: .tern
+        }
+    }
+    /// Only Tern's omp agents report subagents.
+    var hasSubagents: Bool { self == .tern }
 }
 
 struct MusterAgent: Decodable, Identifiable {
@@ -110,7 +126,7 @@ final class MusterStreamStore: ObservableObject {
     @Published private(set) var messages: [MusterMessage] = []
     /// The backend the running watcher reads; nil until its first snapshot.
     @Published private(set) var backend: MusterBackend?
-    /// The backend the person chose; nil lets the watcher pick (Tern when it runs, else herdr).
+    /// The backend the person chose; nil lets the watcher pick (Tern when it runs, else herdr, else Orca).
     @Published private(set) var choice = UserDefaults.standard.string(forKey: MusterPreferences.backend).flatMap(MusterBackend.init(rawValue:))
     @Published private(set) var error: String?
     @Published private(set) var actionError: String?

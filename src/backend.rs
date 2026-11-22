@@ -1,5 +1,6 @@
-//! Which multiplexer muster reads: Tern (panes and omp transcripts) or herdr (hc terminals, and
-//! the transcripts of local Claude Code terminals).
+//! Which multiplexer muster reads: Tern (panes and omp transcripts), herdr (hc terminals, and
+//! the transcripts of local Claude Code and Codex terminals) or Orca (its terminals, agents and
+//! mail). Only the chosen one runs.
 
 use std::any::Any;
 use std::process::{Command, Stdio};
@@ -9,17 +10,18 @@ use anyhow::{Result, bail};
 
 use crate::model::PaneId;
 use crate::source::{self, Update};
-use crate::{herdr, tern};
+use crate::{herdr, orca, tern};
 
 #[derive(Clone, Debug)]
 pub enum Backend {
     Tern { bin: String },
     Herdr { hc: String, app: String },
+    Orca { bin: String },
 }
 
 impl Backend {
-    /// `tern`, `herdr`, or `auto`: the multiplexer this process runs in, else a running Tern,
-    /// else a running herdr core, else Tern.
+    /// `tern`, `herdr`, `orca`, or `auto`: the multiplexer this process runs in, else a running
+    /// Tern, else a running herdr core, else a running Orca, else Tern.
     pub fn resolve(choice: &str) -> Result<Self> {
         let tern = || Backend::Tern {
             bin: tern::binary(),
@@ -28,16 +30,22 @@ impl Backend {
             hc: herdr::binary(),
             app: herdr::app_binary(),
         };
+        let orca = || Backend::Orca {
+            bin: orca::binary(),
+        };
         let set = |name: &str| std::env::var(name).is_ok_and(|v| !v.trim().is_empty());
         Ok(match choice {
             "tern" => tern(),
             "herdr" => herdr(),
+            "orca" => orca(),
             "auto" if set("TERN_PANE") => tern(),
             "auto" if set("HC_TERMINAL_ID") => herdr(),
+            "auto" if set("ORCA_TERMINAL_HANDLE") => orca(),
             "auto" if tern_running(&tern::binary()) => tern(),
             "auto" if herdr::running(&herdr::binary()) => herdr(),
+            "auto" if orca::running() => orca(),
             "auto" => tern(),
-            other => bail!("--backend takes tern, herdr or auto, not {other}"),
+            other => bail!("--backend takes tern, herdr, orca or auto, not {other}"),
         })
     }
 
@@ -45,6 +53,7 @@ impl Backend {
         match self {
             Backend::Tern { .. } => "tern",
             Backend::Herdr { .. } => "herdr",
+            Backend::Orca { .. } => "orca",
         }
     }
 
@@ -52,7 +61,7 @@ impl Backend {
     pub fn pane_word(&self) -> &'static str {
         match self {
             Backend::Tern { .. } => "pane",
-            Backend::Herdr { .. } => "terminal",
+            Backend::Herdr { .. } | Backend::Orca { .. } => "terminal",
         }
     }
 
@@ -61,6 +70,7 @@ impl Backend {
         match self {
             Backend::Tern { .. } => std::env::var("TERN_PANE").ok()?.parse().ok(),
             Backend::Herdr { .. } => Some(herdr::pane_id(&std::env::var("HC_TERMINAL_ID").ok()?)),
+            Backend::Orca { .. } => Some(orca::id(&std::env::var("ORCA_TERMINAL_HANDLE").ok()?)),
         }
     }
 
@@ -68,6 +78,7 @@ impl Backend {
         match self {
             Backend::Tern { bin } => tern::focus(bin, address),
             Backend::Herdr { app, .. } => herdr::focus(app, address),
+            Backend::Orca { bin } => orca::focus(bin, address),
         }
     }
 
@@ -75,6 +86,7 @@ impl Backend {
         match self {
             Backend::Tern { bin } => tern::send(bin, address, text),
             Backend::Herdr { hc, .. } => herdr::send(hc, address, text),
+            Backend::Orca { bin } => orca::send(bin, address, text),
         }
     }
 
@@ -89,6 +101,7 @@ impl Backend {
                 tx,
             )),
             Backend::Herdr { hc, .. } => Box::new(herdr::spawn(hc.clone(), history, tx)),
+            Backend::Orca { .. } => Box::new(orca::spawn(tx)),
         }
     }
 }

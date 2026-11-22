@@ -38,7 +38,8 @@ pub fn app_binary() -> String {
     find("HERDR_APP_BIN", "herdr-app", Some(APP_BUNDLE.into()))
 }
 
-fn find(variable: &str, name: &str, fallback: Option<std::path::PathBuf>) -> String {
+/// `variable`, then `name` on `PATH`, then `fallback` when it exists, else `name`.
+pub fn find(variable: &str, name: &str, fallback: Option<std::path::PathBuf>) -> String {
     if let Ok(bin) = std::env::var(variable)
         && !bin.trim().is_empty()
     {
@@ -332,6 +333,7 @@ fn pane(terminal: &Value, now_ms: i64) -> Option<Pane> {
             .filter(|_| machine.is_none())
             .and_then(|pid| u32::try_from(pid).ok()),
         resumed: crate::codex::resumed_session(&argv),
+        mailbox: false,
     })
 }
 

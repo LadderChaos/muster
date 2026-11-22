@@ -5,6 +5,7 @@ mod codex;
 mod follow;
 mod herdr;
 mod model;
+mod orca;
 mod pane;
 mod source;
 mod tern;
@@ -30,7 +31,7 @@ use crate::model::{Kind, Model, Node};
 use crate::source::Update;
 
 const HELP: &str = "\
-muster — live map of the coding agents in your Tern or herdr window and the messages between them
+muster — live map of the coding agents in your Tern, herdr or Orca window and the messages between them
 
 usage:
   muster [--backend B] [--no-animation] [--all-panes] [--history MB]
@@ -43,11 +44,13 @@ With Tern, reads `tern inspect --json` for panes and omp's session transcripts f
 cross-pane messages (`tern run` / `tern send`), omp IRC, subagent spawns and yields.
 With herdr, reads `hc events` for agents, their reported state and which agent started which,
 and the transcripts of local Claude Code and Codex agents for `hc send` messages between them.
+With Orca, reads its terminals, agents and mail (`orca orchestration send`) over the running
+app's local socket, once a second.
 It never writes to a pane unless you press m and send a message, or use --send.
 
 options:
-  --backend B      tern, herdr or auto (default): the window muster runs in, else a running
-                   Tern, else a running herdr core
+  --backend B      tern, herdr, orca or auto (default): the window muster runs in, else a
+                   running Tern, else a running herdr core, else a running Orca
   --json           print a snapshot (agents and messages) as JSON and exit
   --follow         with --json, stream snapshots as newline-delimited JSON
   --frame WxH      print one rendered frame as text and exit, e.g. --frame 160x48
@@ -63,6 +66,8 @@ environment:
   TERN_BIN       the tern CLI (default: tern on PATH, then the Tern app bundle)
   HC_BIN         herdr-core's hc (default: hc on PATH, then ~/.local/bin/hc)
   HERDR_APP_BIN  the herdr-app CLI, for --focus (default: herdr-app on PATH, then Herdr.app)
+  ORCA_BIN       the orca CLI, for --send and --focus (default: orca on PATH, then Orca.app)
+  ORCA_RUNTIME_FILE  Orca's runtime metadata (default: orca-runtime.json in Orca's data folder)
   NO_COLOR       draw without color
 ";
 
@@ -98,7 +103,7 @@ fn parse_args() -> Result<Option<Args>> {
         match arg.as_str() {
             "--backend" => {
                 let Some(backend) = iter.next() else {
-                    bail!("--backend needs tern, herdr or auto");
+                    bail!("--backend needs tern, herdr, orca or auto");
                 };
                 args.backend = backend;
             }
@@ -240,6 +245,13 @@ fn load(backend: &Backend, history: u64) -> Result<Model> {
             }
         }
         Backend::Tern { bin } => load_tern(&mut model, bin, history)?,
+        Backend::Orca { .. } => {
+            let (panes, mail) = orca::load()?;
+            model.apply_panes(panes);
+            for mail in mail {
+                model.apply(mail.from, None, vec![mail.event]);
+            }
+        }
     }
     model.live = true;
     Ok(model)
@@ -403,7 +415,7 @@ fn snapshot_value(model: &Model, backend: &str) -> Value {
                 "kind": match m.kind { Kind::Pane => "pane", Kind::Irc => "irc", Kind::Spawn => "spawn", Kind::Yield => "yield" },
                 "from": node(&m.from), "to": node(&m.to), "text": m.text,
                 "sent_ms": m.sent, "delivered_ms": m.delivered, "failed": m.failed, "outcome": m.outcome,
-                "delivery_observable": model.agents.get(&m.to.pane()).is_some_and(|a| a.has_transcript()),
+                "delivery_observable": model.agents.get(&m.to.pane()).is_some_and(|a| a.delivery_observable()),
                 "reply": m.reply_to.is_some(), "replied": m.replied,
             })
         })

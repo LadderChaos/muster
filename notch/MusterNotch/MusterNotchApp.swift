@@ -403,7 +403,7 @@ private struct NotchRootView: View {
                 Color.clear.frame(width: gap)
                 HStack(spacing: 8) {
                     Spacer(minLength: 0)
-                    if store.backend != .herdr { subagentsToggle }
+                    if store.backend?.hasSubagents ?? true { subagentsToggle }
                     iconButton(.refresh, label: "Restart watcher") { store.restart() }
                     iconButton(.chevronUp, label: "Collapse Muster Notch", action: collapse)
                     iconButton(.power, label: "Quit Muster Notch") { NSApplication.shared.terminate(nil) }
@@ -421,10 +421,10 @@ private struct NotchRootView: View {
         }
     }
 
-    /// The window's name; a click watches the other one.
+    /// The window's name; a click watches the next one.
     private var backendSwitch: some View {
         let current = store.backend ?? store.choice ?? .tern
-        return Button { store.choose(current.other) } label: {
+        return Button { store.choose(current.next) } label: {
             Text(current.title)
                 .font(.pixel())
                 .foregroundStyle(musterAccent)
@@ -435,9 +435,9 @@ private struct NotchRootView: View {
         }
         .buttonStyle(.plain)
         .fixedSize()
-        .help("Watching \(current.name). Click to watch \(current.other.name).")
+        .help("Watching \(current.name). Click to watch \(current.next.name).")
         .accessibilityLabel("Watching \(current.name)")
-        .accessibilityHint("Switches to \(current.other.name)")
+        .accessibilityHint("Switches to \(current.next.name)")
     }
 
     /// Off: conversations are between top-level panes only. On: each subagent takes part on its own.

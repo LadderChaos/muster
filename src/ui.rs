@@ -262,8 +262,12 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
             (true, Backend::Herdr { .. }) => {
                 "No agents in herdr yet.\nStart one, or press a to show every terminal."
             }
+            (true, Backend::Orca { .. }) => {
+                "No agents in Orca yet.\nStart one, or press a to show every terminal."
+            }
             (false, Backend::Tern { .. }) => "Reading Tern panes…",
             (false, Backend::Herdr { .. }) => "Reading herdr terminals…",
+            (false, Backend::Orca { .. }) => "Reading Orca terminals…",
         };
         frame.render_widget(
             Paragraph::new(text)
@@ -877,7 +881,7 @@ fn observable(app: &App, message: &Message) -> bool {
     app.model
         .agents
         .get(&message.to.pane())
-        .is_some_and(Agent::has_transcript)
+        .is_some_and(Agent::delivery_observable)
 }
 
 /// The part of the center-to-center segment outside both node rectangles.
@@ -1019,6 +1023,7 @@ fn draw_inspector(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
             (Backend::Herdr { .. }, false) => {
                 "no local Claude Code or Codex transcript, so only its state shows"
             }
+            (Backend::Orca { .. }, false) => "messages from Orca mail",
         };
         lines.push(Line::from(vec![
             key("agent"),
@@ -1448,6 +1453,7 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
             None => match app.backend {
                 Backend::Tern { .. } => "No messages yet. Agents talk with\n`tern run <pane> \"From $TERN_PANE …\"`,\nIRC, and subagents.".to_string(),
                 Backend::Herdr { .. } => "No messages yet. Agents talk with\n`hc send <terminal> \"…\"`; muster reads\nlocal Claude Code and Codex transcripts.".to_string(),
+                Backend::Orca { .. } => "No messages yet. Agents talk with\n`orca orchestration send`; muster reads\nOrca's mailbox.".to_string(),
             },
         };
         frame.render_widget(Paragraph::new(text).style(theme.dim()), inner);

@@ -35,6 +35,9 @@ pub struct Pane {
     pub pid: Option<u32>,
     /// The Codex session the terminal's command line resumes (`codex resume <session>`).
     pub resumed: Option<String>,
+    /// The backend records whether messages to this terminal were read (Orca mail), so their
+    /// delivery is observable without a transcript.
+    pub mailbox: bool,
 }
 
 impl Pane {

@@ -1,9 +1,9 @@
 # muster
 
-A live terminal map of coding agents and orchestration traffic in Stencil's Tern
-or a herdr window. Uses the official `tern` CLI and local omp transcripts, or
-herdr-core's `hc` and local Claude Code and Codex transcripts. No plugin or relay
-service is required.
+A live terminal map of coding agents and orchestration traffic in Stencil's Tern,
+a herdr window or Orca. Uses the official `tern` CLI and local omp transcripts,
+herdr-core's `hc` and local Claude Code and Codex transcripts, or Orca's own
+mailbox. No plugin or relay service is required.
 
 ![muster showing four omp agents: a lead sends tasks to API, web and docs agents, and their replies arrive in the message feed](assets/muster.png)
 
@@ -12,7 +12,7 @@ remove it with `cargo uninstall ternwatch`.
 
 ## Run
 
-Requires Rust and a running Tern daemon or herdr core. Build and start from this directory:
+Requires Rust and a running Tern daemon, herdr core or Orca app. Build and start from this directory:
 
 ```sh
 cargo run --release
@@ -85,6 +85,30 @@ Addresses are hc terminal addresses, such as `t7`
 or `vps/t7` for a remote core; `hc send` targets given as terminal names resolve to
 live terminals of that name. `m` and `--send` use `hc send`; Enter and `--focus`
 use `herdr-app` and need the Herdr window to be open.
+
+### Orca
+
+With `--backend orca`, muster reads Orca's terminals, agents and mail once a
+second over the running app's local socket, the one the `orca` CLI uses. It reads
+the socket's path and token from `orca-runtime.json` in Orca's data folder
+(`~/Library/Application Support/orca` on macOS; set `ORCA_RUNTIME_FILE` to use
+another file). This is Orca's own protocol, not a documented API, so an Orca update
+can break it. Over one connection a poll costs about 2 ms per request; starting
+the `orca` CLI for each poll would cost about 0.4 s of CPU every second.
+
+A message is Orca mail between two terminals (`orca orchestration send`). It is
+sent when Orca stores it, and delivered when the recipient reads it with
+`orca orchestration check`; Orca records no time for the read, so muster dates it
+when it first sees it. A reply (`orca orchestration reply`) is linked to its mail.
+Messages typed into a terminal with `orca terminal send` do not show. Addresses are
+terminal handles (`term_…`). `m` and `--send` send Orca mail with
+`orca orchestration send`; Enter and `--focus` use `orca terminal switch`. Each
+uses the `orca` CLI once (`ORCA_BIN`, else `orca` on `PATH`, else Orca.app's),
+and the mail comes from the terminal that runs muster, as for any `orca` command.
+
+An agent's state comes from `orca agent list`. An agent that runs in the
+background, in a workspace with no open tab in Orca's window, shows with its CLI
+but without its state.
 
 ## Keys
 

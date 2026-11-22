@@ -162,6 +162,16 @@ pub enum Event {
     Exit {
         ts: i64,
     },
+    /// An Orca mail message this pane sent, read from Orca's mailbox, not a transcript.
+    /// `delivered`: when the recipient read it. `thread`: the mail it replies to.
+    Mail {
+        ts: i64,
+        id: String,
+        to: u64,
+        text: String,
+        delivered: Option<i64>,
+        thread: Option<String>,
+    },
 }
 
 pub fn parse(entry: &Value) -> Vec<Event> {
