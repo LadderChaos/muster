@@ -111,9 +111,8 @@ sender from the working folder and could pick another agent's terminal. Orca kee
 no mailbox for `muster`, so an agent cannot reply by mail; the mail's subject asks
 it to reply in its terminal.
 
-An agent's state comes from `orca agent list`. An agent that runs in the
-background, in a workspace with no open tab in Orca's window, shows with its CLI
-but without its state.
+An agent's state comes from `orca agent list`, including an agent that runs in the
+background, in a workspace with no open tab in Orca's window.
 
 ## Keys
 

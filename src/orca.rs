@@ -204,8 +204,8 @@ fn read(client: &mut Client, reads: &mut Reads) -> Result<Read> {
 }
 
 /// Live terminals, each with the agent Orca reports in it (`paneKey` = `tabId:leafId`). A
-/// terminal running in the background, in a workspace with no open tab, has a `pty:` tab key
-/// that no agent's `paneKey` matches; its CLI shows, but not its state.
+/// terminal running in the background, in a workspace with no open tab, has a `pty:` tab key;
+/// Orca keeps its pane key as `recordedPaneKey`.
 fn panes(terminals: &Value, agents: &Value, now: i64) -> Vec<Pane> {
     let by_key: HashMap<&str, &Value> = agents["agents"]
         .as_array()
@@ -222,8 +222,12 @@ fn panes(terminals: &Value, agents: &Value, now: i64) -> Vec<Pane> {
         .filter(|t| t["connected"] != false)
         .filter_map(|t| {
             let handle = t["handle"].as_str()?;
-            let key = format!("{}:{}", t["tabId"].as_str()?, t["leafId"].as_str()?);
-            let agent = by_key.get(key.as_str()).copied().unwrap_or(&Value::Null);
+            let live = format!("{}:{}", t["tabId"].as_str()?, t["leafId"].as_str()?);
+            let agent = [Some(live.as_str()), t["recordedPaneKey"].as_str()]
+                .into_iter()
+                .flatten()
+                .find_map(|key| by_key.get(key).copied())
+                .unwrap_or(&Value::Null);
             let cli = text(&agent["agent"]).or_else(|| text(&t["agentIdentity"]));
             let cwd = text(&t["worktreePath"]).unwrap_or_default();
             let workspace = text(&agent["workspace"])
@@ -529,13 +533,21 @@ mod tests {
             {"handle": "term_7240df0f", "tabId": "t1", "leafId": "l1", "connected": true,
              "worktreePath": "/w/orca-ws", "agentIdentity": "claude", "lastOutputAt": 1_000},
             {"handle": "term_dead", "tabId": "t2", "leafId": "l2", "connected": false},
+            {"handle": "term_bg", "tabId": "pty:w@@1", "leafId": "pty:w@@1", "connected": true,
+             "orphaned": true, "recordedPaneKey": "t3:l3"},
         ]});
         let agents = json!({"agents": [
             {"kind": "terminal", "agent": "claude", "state": "working", "paneKey": "t1:l1",
              "workspace": "orca-ws"},
+            {"kind": "terminal", "agent": "codex", "state": "done", "paneKey": "t3:l3",
+             "workspace": "orca-bg"},
         ]});
         let panes = panes(&terminals, &agents, 5_000);
-        assert_eq!(panes.len(), 1);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(
+            (panes[1].title.as_str(), panes[1].state()),
+            ("codex bg: orca-bg", "done")
+        );
         let pane = &panes[0];
         assert_eq!(
             (pane.id, pane.address.as_str()),
