@@ -234,6 +234,39 @@ built from this repository. Its header switches between Tern and herdr. See
 
 ![Muster Notch showing a conversation between two agents](notch/assets/muster-notch.png)
 
+## Phone web app
+
+`muster serve` runs a small web app for a phone or any browser. It shows the
+conversations and agents, with each agent's state, and has a composer that sends to
+open agents the way `--send` does. It works with Tern, herdr and Orca.
+
+```sh
+muster serve                       # http://127.0.0.1:7878
+muster serve --listen 0.0.0.0:7878 # the local network, plain HTTP
+```
+
+Every API request needs a token. muster makes one on first start, stores it in
+`~/.config/muster/serve-token` (mode 600, or under `$XDG_CONFIG_HOME`), and prints it
+with a link that carries it. The app keeps the token on the phone; delete the file to
+make a new one. The app's own files load without the token.
+
+To reach it from a phone without exposing it to the internet, keep the default
+loopback address and publish it inside your tailnet over HTTPS:
+
+```sh
+tailscale serve --bg 7878
+```
+
+Open the `https://<mac>.<tailnet>.ts.net/` address on the phone, paste the token, and
+add the page to the home screen. `--listen` on another address sends the token and
+messages unencrypted, and muster warns about that.
+
+The app reads `GET /api/stream`, newline-delimited snapshots as `--json --follow`
+prints them, and sends with `POST /api/send` and `{"address", "text"}`. A send goes
+only to an agent that is open in the latest snapshot. With Orca, the app's mail comes
+from `muster`, as in Muster Notch. The app has no approval of permission prompts and
+no push notifications yet.
+
 ## Checks
 
 ```sh

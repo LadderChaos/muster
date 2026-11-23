@@ -7,6 +7,7 @@ mod herdr;
 mod model;
 mod orca;
 mod pane;
+mod serve;
 mod source;
 mod tern;
 mod transcript;
@@ -39,6 +40,7 @@ usage:
   muster --frame COLSxROWS [--backend B] [--all-panes] [--history MB]
   muster --send ADDRESS TEXT [--backend B]
   muster --focus ADDRESS [--backend B]
+  muster serve [--listen ADDR:PORT] [--backend B] [--history MB]
 
 With Tern, reads `tern inspect --json` for panes and omp's session transcripts for traffic:
 cross-pane messages (`tern run` / `tern send`), omp IRC, subagent spawns and yields.
@@ -47,6 +49,9 @@ and the transcripts of local Claude Code and Codex agents for `hc send` messages
 With Orca, reads its terminals, agents and mail (`orca orchestration send`) over the running
 app's local socket, once a second.
 It never writes to a pane unless you press m and send a message, or use --send.
+
+serve runs a web app for a phone or another browser: the live snapshots, and a composer that
+sends to open agents. It listens on 127.0.0.1:7878 by default and needs the token it prints.
 
 options:
   --backend B      tern, herdr, orca or auto (default): the window muster runs in, else a
@@ -59,6 +64,7 @@ options:
   --no-animation   no moving packets or spinners; state stays readable
   --all-panes      show every terminal pane, not only agents
   --history MB     transcript history read per agent on start (default 4)
+  --listen A:P     with serve, the address and port to listen on (default 127.0.0.1:7878)
   -h, --help       this help
   -V, --version    version
 
@@ -85,6 +91,8 @@ struct Args {
     animate: bool,
     all_panes: bool,
     history: u64,
+    /// `serve`: the address to listen on.
+    serve: Option<String>,
 }
 
 fn parse_args() -> Result<Option<Args>> {
@@ -97,10 +105,20 @@ fn parse_args() -> Result<Option<Args>> {
         animate: true,
         all_panes: false,
         history: 4 << 20,
+        serve: None,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "serve" => args.serve = Some(serve::LISTEN.into()),
+            "--listen" => {
+                let Some(listen) = iter.next() else {
+                    bail!(
+                        "--listen needs an address and port, for example --listen 127.0.0.1:7878"
+                    );
+                };
+                args.serve = Some(listen);
+            }
             "--backend" => {
                 let Some(backend) = iter.next() else {
                     bail!("--backend needs tern, herdr, orca or auto");
@@ -157,6 +175,9 @@ fn parse_args() -> Result<Option<Args>> {
     if args.follow && !args.json {
         bail!("--follow requires --json");
     }
+    if args.serve.is_some() && (args.json || args.frame.is_some() || args.action.is_some()) {
+        bail!("serve cannot be combined with --json, --frame, --send or --focus");
+    }
     Ok(Some(args))
 }
 
@@ -169,6 +190,9 @@ fn main() -> Result<()> {
         Some(Action::Send(address, text)) => return backend.send(address, text),
         Some(Action::Focus(address)) => return backend.focus(address),
         None => {}
+    }
+    if let Some(listen) = &args.serve {
+        return serve::run(backend, args.history, listen);
     }
     if args.json {
         return if args.follow {
@@ -332,11 +356,26 @@ fn follow(backend: &Backend, history: u64) -> Result<()> {
     } else {
         Some(watch)
     };
+    let stdout = stdout();
+    let mut out = stdout.lock();
+    snapshots(&rx, backend.name(), |snapshot| {
+        serde_json::to_writer(&mut out, &snapshot)?;
+        writeln!(out)?;
+        out.flush()?;
+        Ok(())
+    })
+}
+
+/// Applies the watcher's updates and emits a complete snapshot after each batch, once history
+/// is loaded or the watcher reports an error. Returns only when `emit` fails or the watcher stops.
+fn snapshots(
+    rx: &mpsc::Receiver<Update>,
+    backend: &str,
+    mut emit: impl FnMut(Value) -> Result<()>,
+) -> Result<()> {
     let mut model = Model::default();
     let mut loaded = false;
     let mut error = None;
-    let stdout = stdout();
-    let mut out = stdout.lock();
     while let Ok(first) = rx.recv() {
         // Apply all updates already available before serializing the complete state.
         for update in std::iter::once(first).chain(rx.try_iter()) {
@@ -361,13 +400,11 @@ fn follow(backend: &Backend, history: u64) -> Result<()> {
         // Animation changes are only consumed by the interactive interface.
         model.changes.clear();
         if loaded || error.is_some() {
-            let mut snapshot = snapshot_value(&model, backend.name());
+            let mut snapshot = snapshot_value(&model, backend);
             if let Some(error) = &error {
                 snapshot["error"] = json!(error);
             }
-            serde_json::to_writer(&mut out, &snapshot)?;
-            writeln!(out)?;
-            out.flush()?;
+            emit(snapshot)?;
         }
     }
     bail!("live watcher stopped unexpectedly")
