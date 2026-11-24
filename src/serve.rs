@@ -1,8 +1,10 @@
-//! `muster serve`: the web app in `web/`, the live snapshots `--json --follow` prints, and a
-//! send action, over HTTP. Built for a phone that reaches this Mac through `tailscale serve`
-//! (HTTPS inside the tailnet) or the local network. Every API request needs the token stored
-//! in muster's config folder; the app's own files do not, so it can load and ask for it.
+//! `muster serve`: the web app in `web/`, the live snapshots `--json --follow` prints, a send
+//! action, and a switch between Tern, herdr and Orca, over HTTP. Built for a phone that reaches
+//! this Mac through `tailscale serve` (HTTPS inside the tailnet) or the local network. Every API
+//! request needs the token stored in muster's config folder; the app's own files do not, so it
+//! can load and ask for it. Only the watched window's watcher runs.
 
+use std::any::Any;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -81,45 +83,56 @@ struct Latest {
     targets: HashSet<String>,
 }
 
+/// The watched window. Replacing `guard` stops the old watcher; `generation` tells a stopped
+/// watcher's snapshot thread that its snapshots are stale.
+struct Watcher {
+    backend: Backend,
+    generation: u64,
+    guard: Option<Box<dyn Any + Send>>,
+}
+
 struct Shared {
     latest: Mutex<Latest>,
     changed: Condvar,
-    backend: Backend,
+    watcher: Mutex<Watcher>,
+    history: u64,
     token: String,
     connections: AtomicUsize,
 }
 
-pub fn run(backend: Backend, history: u64, listen: &str) -> Result<()> {
+impl Shared {
+    fn new(backend: Backend, history: u64, token: String) -> Self {
+        Shared {
+            latest: Mutex::default(),
+            changed: Condvar::new(),
+            watcher: Mutex::new(Watcher {
+                backend,
+                generation: 0,
+                guard: None,
+            }),
+            history,
+            token,
+            connections: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// `choice` is `tern`, `herdr`, `orca` or `auto`; `auto` takes the window last chosen in the app,
+/// else the one `--backend auto` finds.
+pub fn run(choice: &str, history: u64, listen: &str) -> Result<()> {
     let addr: SocketAddr = listen
         .parse()
         .with_context(|| format!("--listen needs an address and port, not {listen}"))?;
+    let saved = std::fs::read_to_string(config_dir()?.join(BACKEND_FILE)).ok();
+    let choice = match saved.as_deref().map(str::trim) {
+        Some(saved) if choice == "auto" && BACKENDS.contains(&saved) => saved,
+        _ => choice,
+    };
+    let backend = Backend::resolve(choice)?;
     let token = token()?;
     let listener = TcpListener::bind(addr).with_context(|| format!("cannot listen on {addr}"))?;
-    let shared = Arc::new(Shared {
-        latest: Mutex::default(),
-        changed: Condvar::new(),
-        backend: backend.clone(),
-        token,
-        connections: AtomicUsize::new(0),
-    });
-
-    let (tx, rx) = mpsc::channel();
-    let watch = backend.spawn(history, tx);
-    {
-        let shared = Arc::clone(&shared);
-        let name = backend.name();
-        thread::spawn(move || {
-            let _watch = watch;
-            let result = crate::snapshots(&rx, name, |snapshot| {
-                publish(&shared, &snapshot);
-                Ok(())
-            });
-            if let Err(error) = result {
-                eprintln!("muster serve: {error:#}");
-                std::process::exit(1);
-            }
-        });
-    }
+    let shared = Arc::new(Shared::new(backend.clone(), history, token));
+    watch(&shared, backend.clone());
 
     println!("muster serve: {} on http://{addr}", backend.name());
     println!("token: {}", shared.token);
@@ -144,6 +157,75 @@ pub fn run(backend: Backend, history: u64, listen: &str) -> Result<()> {
     Ok(())
 }
 
+const BACKENDS: [&str; 3] = ["tern", "herdr", "orca"];
+/// The window last chosen in the app, kept across restarts.
+const BACKEND_FILE: &str = "serve-backend";
+
+/// Stops the current watcher, if any, and watches `backend`. Until its history is loaded, the
+/// app gets an empty snapshot marked `loading`.
+fn watch(shared: &Arc<Shared>, backend: Backend) {
+    let mut watcher = shared.watcher.lock().unwrap();
+    watcher.generation += 1;
+    let generation = watcher.generation;
+    // The old watcher stops before the next starts, so two never run at once.
+    watcher.guard = None;
+    let name = backend.name();
+    publish(
+        shared,
+        &json!({"backend": name, "agents": [], "messages": [], "loading": true}),
+    );
+    let (tx, rx) = mpsc::channel();
+    watcher.guard = Some(backend.spawn(shared.history, tx));
+    watcher.backend = backend;
+    let shared = Arc::clone(shared);
+    thread::spawn(move || {
+        let result = crate::snapshots(&rx, name, |snapshot| {
+            // Held while publishing, so a switch cannot land between the check and the publish.
+            let watcher = shared.watcher.lock().unwrap();
+            if watcher.generation != generation {
+                bail!("replaced");
+            }
+            publish(&shared, &snapshot);
+            Ok(())
+        });
+        if shared.watcher.lock().unwrap().generation == generation
+            && let Err(error) = result
+        {
+            eprintln!("muster serve: {error:#}");
+            std::process::exit(1);
+        }
+    });
+}
+
+/// Switches to `{"backend": "tern" | "herdr" | "orca"}` and saves the choice.
+fn switch(shared: &Arc<Shared>, body: &[u8]) -> (&'static str, Value) {
+    let request = serde_json::from_slice::<Value>(body).unwrap_or_default();
+    let Some(choice) = request["backend"].as_str().filter(|c| BACKENDS.contains(c)) else {
+        return (
+            "400 Bad Request",
+            json!({"error": "backend must be tern, herdr or orca"}),
+        );
+    };
+    let backend = match Backend::resolve(choice) {
+        Ok(backend) => backend,
+        Err(error) => {
+            return (
+                "500 Internal Server Error",
+                json!({"error": format!("{error:#}")}),
+            );
+        }
+    };
+    if shared.watcher.lock().unwrap().backend.name() != choice {
+        watch(shared, backend);
+    }
+    if let Err(error) =
+        config_dir().and_then(|dir| Ok(std::fs::write(dir.join(BACKEND_FILE), choice)?))
+    {
+        eprintln!("muster serve: cannot save the window: {error:#}");
+    }
+    ("200 OK", json!({"ok": true, "backend": choice}))
+}
+
 fn publish(shared: &Shared, snapshot: &Value) {
     let targets = snapshot["agents"]
         .as_array()
@@ -162,14 +244,22 @@ fn publish(shared: &Shared, snapshot: &Value) {
     shared.changed.notify_all();
 }
 
+fn config_dir() -> Result<PathBuf> {
+    Ok(
+        match std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config")
+            }
+        }
+        .join("muster"),
+    )
+}
+
 /// The token in `$XDG_CONFIG_HOME/muster/serve-token` (else `~/.config/…`), made on first use.
 /// Delete the file to make a new one.
 fn token() -> Result<String> {
-    let dir = match std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config"),
-    }
-    .join("muster");
+    let dir = config_dir()?;
     let file = dir.join("serve-token");
     if let Ok(token) = std::fs::read_to_string(&file) {
         let token = token.trim();
@@ -247,7 +337,7 @@ fn read_head(reader: &mut impl BufRead) -> Result<Request> {
     Ok(request)
 }
 
-fn handle(stream: TcpStream, shared: &Shared) -> Result<()> {
+fn handle(stream: TcpStream, shared: &Arc<Shared>) -> Result<()> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut out = stream;
@@ -262,7 +352,7 @@ fn handle(stream: TcpStream, shared: &Shared) -> Result<()> {
     }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/stream") => stream_snapshots(&mut out, shared),
-        ("POST", "/api/send") => {
+        ("POST", "/api/send" | "/api/backend") => {
             if request.length > MAX_BODY {
                 return respond(
                     &mut out,
@@ -272,7 +362,11 @@ fn handle(stream: TcpStream, shared: &Shared) -> Result<()> {
             }
             let mut body = vec![0; request.length];
             reader.read_exact(&mut body)?;
-            let (status, reply) = send(shared, &body);
+            let (status, reply) = if request.path == "/api/send" {
+                send(shared, &body)
+            } else {
+                switch(shared, &body)
+            };
             respond(&mut out, status, &reply)
         }
         (_, _) if api => respond(
@@ -330,16 +424,21 @@ fn respond(out: &mut TcpStream, status: &str, body: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Sends `{"address", "text"}` to an open agent through the backend, as `--send` does.
+/// Sends `{"backend", "address", "text"}` to an open agent through the backend, as `--send`
+/// does. `backend` is the window the app showed: after a switch, from this or another client, an
+/// address may name another window's pane, so a send for another window is refused.
 fn send(shared: &Shared, body: &[u8]) -> (&'static str, Value) {
     let Ok(request) = serde_json::from_slice::<Value>(body) else {
         return ("400 Bad Request", json!({"error": "body is not JSON"}));
     };
-    let (Some(address), Some(text)) = (request["address"].as_str(), request["text"].as_str())
-    else {
+    let (Some(window), Some(address), Some(text)) = (
+        request["backend"].as_str(),
+        request["address"].as_str(),
+        request["text"].as_str(),
+    ) else {
         return (
             "400 Bad Request",
-            json!({"error": "needs address and text"}),
+            json!({"error": "needs backend, address and text"}),
         );
     };
     let text = text.trim();
@@ -349,10 +448,22 @@ fn send(shared: &Shared, body: &[u8]) -> (&'static str, Value) {
             json!({"error": "text must be 1 to 8192 bytes"}),
         );
     }
-    if !shared.latest.lock().unwrap().targets.contains(address) {
-        return ("409 Conflict", json!({"error": "that agent is not open"}));
-    }
-    match shared.backend.send(address, text) {
+    // Same lock order as `watch` and `publish`: the target is checked against the snapshot of
+    // the backend that sends, with no switch in between.
+    let backend = {
+        let watcher = shared.watcher.lock().unwrap();
+        if watcher.backend.name() != window {
+            return (
+                "409 Conflict",
+                json!({"error": format!("muster now watches {}, not {window}", watcher.backend.name())}),
+            );
+        }
+        if !shared.latest.lock().unwrap().targets.contains(address) {
+            return ("409 Conflict", json!({"error": "that agent is not open"}));
+        }
+        watcher.backend.clone()
+    };
+    match backend.send(address, text) {
         Ok(()) => ("200 OK", json!({"ok": true})),
         Err(error) => ("502 Bad Gateway", json!({"error": format!("{error:#}")})),
     }
@@ -448,15 +559,13 @@ mod tests {
 
     #[test]
     fn only_open_agents_are_send_targets() {
-        let shared = Shared {
-            latest: Mutex::default(),
-            changed: Condvar::new(),
-            backend: Backend::Tern {
+        let shared = Shared::new(
+            Backend::Tern {
                 bin: "/nonexistent".into(),
             },
-            token: String::new(),
-            connections: AtomicUsize::new(0),
-        };
+            0,
+            String::new(),
+        );
         publish(
             &shared,
             &json!({"agents": [
@@ -468,7 +577,15 @@ mod tests {
         let targets = shared.latest.lock().unwrap().targets.clone();
         assert_eq!(targets.len(), 2);
         assert!(targets.contains("7") && targets.contains("term_x"));
-        let (status, _) = send(&shared, br#"{"address": "term_closed", "text": "hi"}"#);
-        assert_eq!(status, "409 Conflict");
+        let send = |body: &[u8]| send(&shared, body).1["error"].as_str().map(str::to_string);
+        assert_eq!(
+            send(br#"{"backend": "tern", "address": "term_closed", "text": "hi"}"#).as_deref(),
+            Some("that agent is not open")
+        );
+        // An open address, but from a composer that showed another window.
+        assert_eq!(
+            send(br#"{"backend": "orca", "address": "term_x", "text": "hi"}"#).as_deref(),
+            Some("muster now watches tern, not orca")
+        );
     }
 }

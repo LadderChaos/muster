@@ -18,14 +18,17 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/")) return;
+  // Network first. When the Mac does not answer, or the proxy in front of it answers with an
+  // error because muster serve is down, the cached app loads and shows that it is offline.
   event.respondWith(
     fetch(event.request)
       .then((response) => {
         if (response.ok) {
           const copy = response.clone();
           caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+          return response;
         }
-        return response;
+        return caches.match(event.request).then((cached) => cached || response);
       })
       .catch(() => caches.match(event.request))
   );

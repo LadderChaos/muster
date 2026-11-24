@@ -238,7 +238,11 @@ built from this repository. Its header switches between Tern and herdr. See
 
 `muster serve` runs a small web app for a phone or any browser. It shows the
 conversations and agents, with each agent's state, and has a composer that sends to
-open agents the way `--send` does. It works with Tern, herdr and Orca.
+open agents the way `--send` does. The window name at the top, **TERN**, **HERDR** or
+**ORCA**, switches to the next one, as in Muster Notch: the server stops the current
+watcher and starts the next, so only one runs. Without `--backend`, it starts with the
+window last chosen (`~/.config/muster/serve-backend`), else the one `--backend auto`
+finds.
 
 ```sh
 muster serve                       # http://127.0.0.1:7878
@@ -262,10 +266,40 @@ add the page to the home screen. `--listen` on another address sends the token a
 messages unencrypted, and muster warns about that.
 
 The app reads `GET /api/stream`, newline-delimited snapshots as `--json --follow`
-prints them, and sends with `POST /api/send` and `{"address", "text"}`. A send goes
-only to an agent that is open in the latest snapshot. With Orca, the app's mail comes
-from `muster`, as in Muster Notch. The app has no approval of permission prompts and
-no push notifications yet.
+prints them, sends with `POST /api/send` and `{"backend", "address", "text"}`, and
+switches with `POST /api/backend` and `{"backend"}`. A send goes only to an agent that is
+open in the latest snapshot of the window it names; a send for another window, as from a
+page that has not seen a switch yet, is refused. With Orca, the app's mail comes from
+`muster`, as in Muster Notch. The app has no approval of permission prompts and no push
+notifications yet.
+
+To keep it running across logins and crashes on macOS, run it as a launch agent.
+Save this as `~/Library/LaunchAgents/local.muster.serve.plist`, with your home folder
+in the paths, and load it with
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.muster.serve.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.muster.serve</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/you/.cargo/bin/muster</string><string>serve</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/Users/you/.local/bin:/Users/you/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/you/Library/Logs/muster-serve.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/Library/Logs/muster-serve.log</string>
+</dict>
+</plist>
+```
+
+`PATH` must reach `tern`, `hc` and `orca`, since a launch agent does not get your
+shell's. After `cargo install`, restart it with
+`launchctl kickstart -k gui/$(id -u)/local.muster.serve`.
 
 ## Checks
 

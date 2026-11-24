@@ -50,8 +50,9 @@ With Orca, reads its terminals, agents and mail (`orca orchestration send`) over
 app's local socket, once a second.
 It never writes to a pane unless you press m and send a message, or use --send.
 
-serve runs a web app for a phone or another browser: the live snapshots, and a composer that
-sends to open agents. It listens on 127.0.0.1:7878 by default and needs the token it prints.
+serve runs a web app for a phone or another browser: the live snapshots, a composer that sends
+to open agents, and a switch between Tern, herdr and Orca; it keeps the last window chosen.
+It listens on 127.0.0.1:7878 by default and needs the token it prints.
 
 options:
   --backend B      tern, herdr, orca or auto (default): the window muster runs in, else a
@@ -185,14 +186,14 @@ fn main() -> Result<()> {
     let Some(args) = parse_args()? else {
         return Ok(());
     };
+    if let Some(listen) = &args.serve {
+        return serve::run(&args.backend, args.history, listen);
+    }
     let backend = Backend::resolve(&args.backend)?;
     match &args.action {
         Some(Action::Send(address, text)) => return backend.send(address, text),
         Some(Action::Focus(address)) => return backend.focus(address),
         None => {}
-    }
-    if let Some(listen) = &args.serve {
-        return serve::run(backend, args.history, listen);
     }
     if args.json {
         return if args.follow {

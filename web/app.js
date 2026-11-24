@@ -147,6 +147,8 @@ function render() {
     bindSetup();
   } else if (!snapshot) {
     main.innerHTML = `<div class="empty">${connection === "offline" ? "Cannot reach muster serve. Retrying…" : "Connecting…"}</div>`;
+  } else if (snapshot.loading) {
+    main.innerHTML = `<div class="empty">Loading ${esc(snapshot.backend)}…</div>`;
   } else if (r.view === "chat") {
     main.innerHTML = chatView(r.arg);
   } else if (r.view === "agents") {
@@ -168,13 +170,45 @@ function render() {
   else if (fresh) window.scrollTo(0, 0);
 }
 
+/// The window after the shown one, in the notch's order.
+const NEXT_BACKEND = { tern: "herdr", herdr: "orca", orca: "tern" };
+
+$("backend").addEventListener("click", async () => {
+  if (!snapshot || !token) return;
+  const next = NEXT_BACKEND[snapshot.backend] || "tern";
+  const button = $("backend");
+  button.disabled = true;
+  try {
+    const res = await fetch("/api/backend", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ backend: next }),
+    });
+    const reply = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(reply.error || `HTTP ${res.status}`);
+    // Conversations and agents belong to the window; start from its chats.
+    if (route().view !== "chats") location.hash = "#/chats";
+  } catch (error) {
+    $("banner").hidden = false;
+    $("banner").textContent = `Cannot switch to ${next}: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+});
+
 function renderHeader() {
-  $("backend").textContent = snapshot ? snapshot.backend.toUpperCase() : "";
+  $("backend").textContent = snapshot ? `${snapshot.backend.toUpperCase()} ▸` : "";
+  $("backend").title = snapshot ? `Switch to ${NEXT_BACKEND[snapshot.backend]}` : "";
   const conn = $("conn");
   conn.className = `conn ${connection}`;
   conn.textContent = connection;
   if (!snapshot) {
     $("summary").textContent = "";
+    $("banner").hidden = true;
+    return;
+  }
+  if (snapshot.loading) {
+    $("summary").textContent = "loading…";
     $("banner").hidden = true;
     return;
   }
@@ -345,7 +379,7 @@ $("composer").addEventListener("submit", async (e) => {
     const res = await fetch("/api/send", {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ address: composerTarget, text }),
+      body: JSON.stringify({ backend: snapshot.backend, address: composerTarget, text }),
     });
     const reply = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(reply.error || `HTTP ${res.status}`);

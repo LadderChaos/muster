@@ -45,9 +45,13 @@ button, textarea, input { font: inherit; color: inherit; }
 .chip {
   padding: 0 6px;
   border: 1px solid var(--line);
+  background: none;
   color: var(--dim);
   font-size: 13px;
 }
+button.chip { cursor: pointer; }
+button.chip:active { border-color: var(--accent); color: var(--accent); }
+button.chip:disabled { opacity: 0.5; }
 .conn { margin-left: auto; font-size: 13px; color: var(--dim); }
 .conn::before { content: "■ "; }
 .conn.live::before { color: var(--ok); }
