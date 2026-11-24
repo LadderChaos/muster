@@ -153,6 +153,8 @@ function render() {
     main.innerHTML = chatView(r.arg);
   } else if (r.view === "agents") {
     main.innerHTML = agentsView();
+  } else if (r.view === "brief") {
+    main.innerHTML = briefView();
   } else if (r.view === "agent") {
     const agent = agentByPane(Number(r.arg));
     main.innerHTML = agentView(agent);
@@ -169,6 +171,48 @@ function render() {
   if (r.view === "chat" && (fresh || atBottom)) window.scrollTo(0, document.body.scrollHeight);
   else if (fresh) window.scrollTo(0, 0);
 }
+
+// ---- Brief ----
+
+const BRIEF_KEY = "muster.brief";
+const BRIEF_MINUTES = 30;
+/// The last brief, kept on the phone: `{brief, at, backend, minutes}`.
+let lastBrief = JSON.parse(localStorage.getItem(BRIEF_KEY) || "null");
+let briefBusy = false;
+let briefError = "";
+
+function briefView() {
+  const shown = lastBrief && lastBrief.backend === snapshot.backend ? lastBrief : null;
+  return `<button id="briefButton" class="briefButton" type="button" ${briefBusy ? "disabled" : ""}>
+      ${briefBusy ? "Writing the brief…" : `Brief me · last ${BRIEF_MINUTES} min`}</button>
+    <div class="facts">Claude reads each agent's state, last prompt and reply, and the messages between agents.</div>
+    ${briefError ? `<div class="banner">${esc(briefError)}</div>` : ""}
+    ${shown ? `<div class="section">${esc(shown.backend.toUpperCase())} · ${clock(shown.at)} · last ${shown.minutes} min</div>
+      <div class="brief">${esc(shown.brief)}</div>` : ""}`;
+}
+
+document.addEventListener("click", async (e) => {
+  if (e.target.id !== "briefButton" || briefBusy || !snapshot) return;
+  briefBusy = true;
+  briefError = "";
+  render();
+  try {
+    const res = await fetch("/api/brief", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ backend: snapshot.backend, minutes: BRIEF_MINUTES }),
+    });
+    const reply = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(reply.error || `HTTP ${res.status}`);
+    lastBrief = reply;
+    localStorage.setItem(BRIEF_KEY, JSON.stringify(reply));
+  } catch (error) {
+    briefError = `No brief: ${error.message}`;
+  } finally {
+    briefBusy = false;
+    render();
+  }
+});
 
 /// The window after the shown one, in the notch's order.
 const NEXT_BACKEND = { tern: "herdr", herdr: "orca", orca: "tern" };

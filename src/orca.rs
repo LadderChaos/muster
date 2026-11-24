@@ -198,7 +198,7 @@ fn read(client: &mut Client, reads: &mut Reads) -> Result<Read> {
     let inbox = client.call("orchestration.inbox", json!({ "limit": MAIL_LIMIT }))?;
     let now = now_ms();
     Ok(Read {
-        panes: panes(&terminals, &agents, now),
+        panes: panes(&terminals, &agents, &mut reads.replies, now),
         mail: mail(&inbox, reads, now),
     })
 }
@@ -206,7 +206,16 @@ fn read(client: &mut Client, reads: &mut Reads) -> Result<Read> {
 /// Live terminals, each with the agent Orca reports in it (`paneKey` = `tabId:leafId`). A
 /// terminal running in the background, in a workspace with no open tab, has a `pty:` tab key;
 /// Orca keeps its pane key as `recordedPaneKey`.
-fn panes(terminals: &Value, agents: &Value, now: i64) -> Vec<Pane> {
+///
+/// Orca reports an agent's last reply (`lastAssistantMessage`) with no time of its own;
+/// `updatedAt` is its latest status update, which moves on while the agent works. A reply is
+/// dated by the `updatedAt` of the poll that first shows it, and keeps that date in `replies`.
+fn panes(
+    terminals: &Value,
+    agents: &Value,
+    replies: &mut HashMap<String, (i64, String)>,
+    now: i64,
+) -> Vec<Pane> {
     let by_key: HashMap<&str, &Value> = agents["agents"]
         .as_array()
         .into_iter()
@@ -235,6 +244,13 @@ fn panes(terminals: &Value, agents: &Value, now: i64) -> Vec<Pane> {
             let state = text(&agent["state"]);
             let working = state.as_deref() == Some("working");
             let last = t["lastOutputAt"].as_i64().unwrap_or(now);
+            let reply = text(&agent["lastAssistantMessage"]).map(|reply| {
+                let seen = replies.entry(handle.to_string()).or_default();
+                if seen.1 != reply {
+                    *seen = (agent["updatedAt"].as_i64().unwrap_or(now), reply);
+                }
+                seen.clone()
+            });
             // Orca's terminal titles are the shell's; name the agent and its handle instead.
             let short: String = handle.trim_start_matches("term_").chars().take(4).collect();
             Some(Pane {
@@ -253,18 +269,22 @@ fn panes(terminals: &Value, agents: &Value, now: i64) -> Vec<Pane> {
                 cli,
                 status: state,
                 mailbox: true,
+                reply,
                 ..Pane::default()
             })
         })
         .collect()
 }
 
-/// When muster first saw each mail read. Orca records no time for a read.
+/// What muster remembers between polls, since Orca records no time for these.
 #[derive(Default)]
 struct Reads {
     /// The first poll, which reads history, is done.
     baselined: bool,
+    /// When muster first saw each mail read.
     at: HashMap<String, i64>,
+    /// Each terminal's last reply, dated when first seen (see `panes`).
+    replies: HashMap<String, (i64, String)>,
 }
 
 /// Mail between terminals, oldest first. Mail is delivered only once Orca marks it `read`
@@ -331,8 +351,8 @@ fn fingerprint(panes: &[Pane]) -> String {
         .iter()
         .map(|p| {
             format!(
-                "{}\t{}\t{}\t{:?}\t{:?}\n",
-                p.id, p.title, p.cwd, p.cli, p.status
+                "{}\t{}\t{}\t{:?}\t{:?}\t{:?}\n",
+                p.id, p.title, p.cwd, p.cli, p.status, p.reply
             )
         })
         .collect()
@@ -542,7 +562,7 @@ mod tests {
             {"kind": "terminal", "agent": "codex", "state": "done", "paneKey": "t3:l3",
              "workspace": "orca-bg"},
         ]});
-        let panes = panes(&terminals, &agents, 5_000);
+        let panes = panes(&terminals, &agents, &mut HashMap::new(), 5_000);
         assert_eq!(panes.len(), 2);
         assert_eq!(
             (panes[1].title.as_str(), panes[1].state()),
@@ -558,5 +578,26 @@ mod tests {
             (pane.state(), pane.quiet_ms, pane.mailbox),
             ("working", 0, true)
         );
+    }
+
+    #[test]
+    fn a_reply_keeps_the_time_it_was_first_seen() {
+        let terminals = json!({"terminals": [
+            {"handle": "term_a", "tabId": "t1", "leafId": "l1", "connected": true},
+        ]});
+        let agents = |reply: &str, updated: i64| {
+            json!({"agents": [{"kind": "terminal", "agent": "claude", "state": "working",
+                "paneKey": "t1:l1", "lastAssistantMessage": reply, "updatedAt": updated}]})
+        };
+        let mut replies = HashMap::new();
+        let mut reply = |reply, updated| {
+            panes(&terminals, &agents(reply, updated), &mut replies, 9_000)[0]
+                .reply
+                .clone()
+        };
+        assert_eq!(reply("tests pass", 100), Some((100, "tests pass".into())));
+        // Orca's updatedAt moves on with every tool call; the reply did not change.
+        assert_eq!(reply("tests pass", 200), Some((100, "tests pass".into())));
+        assert_eq!(reply("merged", 300), Some((300, "merged".into())));
     }
 }

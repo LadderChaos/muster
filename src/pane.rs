@@ -38,6 +38,9 @@ pub struct Pane {
     /// The backend records whether messages to this terminal were read (Orca mail), so their
     /// delivery is observable without a transcript.
     pub mailbox: bool,
+    /// The agent's last reply and when it was first seen, as the backend reports it without a
+    /// transcript (Orca).
+    pub reply: Option<(i64, String)>,
 }
 
 impl Pane {

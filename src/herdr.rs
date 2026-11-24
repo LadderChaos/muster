@@ -334,6 +334,7 @@ fn pane(terminal: &Value, now_ms: i64) -> Option<Pane> {
             .and_then(|pid| u32::try_from(pid).ok()),
         resumed: crate::codex::resumed_session(&argv),
         mailbox: false,
+        reply: None,
     })
 }
 

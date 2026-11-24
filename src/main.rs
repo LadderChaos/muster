@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod brief;
 mod claude;
 mod codex;
 mod follow;
@@ -41,6 +42,7 @@ usage:
   muster --send ADDRESS TEXT [--backend B]
   muster --focus ADDRESS [--backend B]
   muster serve [--listen ADDR:PORT] [--backend B] [--history MB]
+  muster brief [--minutes N] [--backend B] [--history MB]
 
 With Tern, reads `tern inspect --json` for panes and omp's session transcripts for traffic:
 cross-pane messages (`tern run` / `tern send`), omp IRC, subagent spawns and yields.
@@ -54,6 +56,10 @@ serve runs a web app for a phone or another browser: the live snapshots, a compo
 to open agents, and a switch between Tern, herdr and Orca; it keeps the last window chosen.
 It listens on 127.0.0.1:7878 by default and needs the token it prints.
 
+brief prints a short summary of the last minutes: each agent's state, its last prompt and
+reply, and the messages between agents, summarized by `claude -p` with no tools, or by the
+command in MUSTER_BRIEF_CMD, which reads the instructions and digest on stdin.
+
 options:
   --backend B      tern, herdr, orca or auto (default): the window muster runs in, else a
                    running Tern, else a running herdr core, else a running Orca
@@ -66,6 +72,7 @@ options:
   --all-panes      show every terminal pane, not only agents
   --history MB     transcript history read per agent on start (default 4)
   --listen A:P     with serve, the address and port to listen on (default 127.0.0.1:7878)
+  --minutes N      with brief, the minutes of activity it covers (default 30)
   -h, --help       this help
   -V, --version    version
 
@@ -94,6 +101,8 @@ struct Args {
     history: u64,
     /// `serve`: the address to listen on.
     serve: Option<String>,
+    /// `brief`: the minutes it covers.
+    brief: Option<u64>,
 }
 
 fn parse_args() -> Result<Option<Args>> {
@@ -107,10 +116,21 @@ fn parse_args() -> Result<Option<Args>> {
         all_panes: false,
         history: 4 << 20,
         serve: None,
+        brief: None,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "brief" => {
+                args.brief.get_or_insert(brief::MINUTES);
+            }
+            "--minutes" => {
+                let Some(minutes) = iter.next().and_then(|v| v.parse().ok()).filter(|m| *m > 0)
+                else {
+                    bail!("--minutes needs a number of minutes, for example --minutes 30");
+                };
+                args.brief = Some(minutes);
+            }
             "serve" => args.serve = Some(serve::LISTEN.into()),
             "--listen" => {
                 let Some(listen) = iter.next() else {
@@ -179,6 +199,11 @@ fn parse_args() -> Result<Option<Args>> {
     if args.serve.is_some() && (args.json || args.frame.is_some() || args.action.is_some()) {
         bail!("serve cannot be combined with --json, --frame, --send or --focus");
     }
+    if args.brief.is_some()
+        && (args.serve.is_some() || args.json || args.frame.is_some() || args.action.is_some())
+    {
+        bail!("brief cannot be combined with serve, --json, --frame, --send or --focus");
+    }
     Ok(Some(args))
 }
 
@@ -194,6 +219,16 @@ fn main() -> Result<()> {
         Some(Action::Send(address, text)) => return backend.send(address, text),
         Some(Action::Focus(address)) => return backend.focus(address),
         None => {}
+    }
+    if let Some(minutes) = args.brief {
+        let model = load(&backend, args.history)?;
+        let digest = brief::digest(
+            &snapshot_value(&model, backend.name()),
+            App::now_ms(),
+            minutes,
+        );
+        println!("{}", brief::summarize(&digest)?);
+        return Ok(());
     }
     if args.json {
         return if args.follow {
@@ -432,6 +467,11 @@ fn snapshot_value(model: &Model, backend: &str) -> Value {
         .filter(|a| a.is_agent() || model.messages.iter().any(|m| m.from.pane() == a.pane.id || m.to.pane() == a.pane.id))
         .map(|a| {
             let (_, label, description) = a.label();
+            // The person's last prompt and the agent's last reply, for the brief; clipped so each
+            // streamed snapshot stays small.
+            let turn = |turn: &Option<(i64, String)>| {
+                turn.as_ref().map(|(ms, text)| json!({"ms": ms, "text": brief::clip(text, brief::TURN_CHARS)}))
+            };
             json!({
                 "pane": a.pane.id, "address": a.pane.address, "label": label, "title": a.pane.title, "description": description,
                 "cwd": a.pane.cwd, "session": a.pane.session, "tab": a.pane.tab, "open": a.present,
@@ -440,6 +480,7 @@ fn snapshot_value(model: &Model, backend: &str) -> Value {
                 "model": a.model, "tokens": a.tokens, "tool": a.tool().map(|(t, i)| json!({"name": t, "intent": i})),
                 "todo": a.todo.map(|(d, t)| json!({"done": d, "total": t})),
                 "subagents": a.subs.iter().map(|(n, s)| json!({"name": n, "running": s.running(now), "done": s.done})).collect::<Vec<_>>(),
+                "last_ms": a.last_ms, "last_prompt": turn(&a.last_user), "last_reply": turn(&a.last_reply),
             })
         })
         .collect();

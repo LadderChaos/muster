@@ -206,6 +206,15 @@ impl Model {
         for pane in panes {
             let agent = self.agents.entry(pane.id).or_default();
             agent.present = true;
+            // A reply the backend reports replaces an older one read from a transcript.
+            if let Some(reply) = &pane.reply
+                && agent
+                    .last_reply
+                    .as_ref()
+                    .is_none_or(|(at, _)| *at < reply.0)
+            {
+                agent.last_reply = Some(reply.clone());
+            }
             agent.pane = pane;
         }
         let messages = &self.messages;

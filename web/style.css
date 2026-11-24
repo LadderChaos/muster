@@ -178,3 +178,20 @@ body.composing main { padding-bottom: calc(env(safe-area-inset-bottom) + 120px);
   color: var(--accent);
 }
 .setup code { color: var(--accent); }
+
+.briefButton {
+  width: 100%;
+  margin: 6px 0 8px;
+  padding: 12px;
+  border: 1px solid var(--accent);
+  background: rgba(92, 219, 235, 0.15);
+  color: var(--accent);
+}
+.briefButton:disabled { opacity: 0.6; }
+.brief {
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: var(--faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

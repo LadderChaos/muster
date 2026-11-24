@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -98,6 +98,8 @@ struct Shared {
     history: u64,
     token: String,
     connections: AtomicUsize,
+    /// A brief is being written; one at a time, since each runs a summarizer.
+    briefing: AtomicBool,
 }
 
 impl Shared {
@@ -113,6 +115,7 @@ impl Shared {
             history,
             token,
             connections: AtomicUsize::new(0),
+            briefing: AtomicBool::new(false),
         }
     }
 }
@@ -352,7 +355,7 @@ fn handle(stream: TcpStream, shared: &Arc<Shared>) -> Result<()> {
     }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/stream") => stream_snapshots(&mut out, shared),
-        ("POST", "/api/send" | "/api/backend") => {
+        ("POST", "/api/send" | "/api/backend" | "/api/brief") => {
             if request.length > MAX_BODY {
                 return respond(
                     &mut out,
@@ -362,10 +365,10 @@ fn handle(stream: TcpStream, shared: &Arc<Shared>) -> Result<()> {
             }
             let mut body = vec![0; request.length];
             reader.read_exact(&mut body)?;
-            let (status, reply) = if request.path == "/api/send" {
-                send(shared, &body)
-            } else {
-                switch(shared, &body)
+            let (status, reply) = match request.path.as_str() {
+                "/api/send" => send(shared, &body),
+                "/api/brief" => brief(shared, &body),
+                _ => switch(shared, &body),
             };
             respond(&mut out, status, &reply)
         }
@@ -465,6 +468,50 @@ fn send(shared: &Shared, body: &[u8]) -> (&'static str, Value) {
     };
     match backend.send(address, text) {
         Ok(()) => ("200 OK", json!({"ok": true})),
+        Err(error) => ("502 Bad Gateway", json!({"error": format!("{error:#}")})),
+    }
+}
+
+/// A brief of `{"backend", "minutes"}`: the last minutes of the window the app shows, from the
+/// latest snapshot, written by the summarizer (see `brief`). Takes as long as the summarizer.
+fn brief(shared: &Shared, body: &[u8]) -> (&'static str, Value) {
+    let request = serde_json::from_slice::<Value>(body).unwrap_or_default();
+    let Some(window) = request["backend"].as_str() else {
+        return ("400 Bad Request", json!({"error": "needs backend"}));
+    };
+    let minutes = request["minutes"]
+        .as_u64()
+        .filter(|m| (1..=24 * 60).contains(m))
+        .unwrap_or(crate::brief::MINUTES);
+    let snapshot = {
+        let watcher = shared.watcher.lock().unwrap();
+        if watcher.backend.name() != window {
+            return (
+                "409 Conflict",
+                json!({"error": format!("muster now watches {}, not {window}", watcher.backend.name())}),
+            );
+        }
+        Arc::clone(&shared.latest.lock().unwrap().json)
+    };
+    let snapshot: Value = serde_json::from_str(&snapshot).unwrap_or_default();
+    if snapshot["loading"] == true || snapshot.is_null() {
+        return ("409 Conflict", json!({"error": "still loading"}));
+    }
+    if shared.briefing.swap(true, Ordering::SeqCst) {
+        return (
+            "429 Too Many Requests",
+            json!({"error": "a brief is already being written"}),
+        );
+    }
+    let now = crate::app::App::now_ms();
+    let digest = crate::brief::digest(&snapshot, now, minutes);
+    let result = crate::brief::summarize(&digest);
+    shared.briefing.store(false, Ordering::SeqCst);
+    match result {
+        Ok(text) => (
+            "200 OK",
+            json!({"brief": text, "backend": window, "minutes": minutes, "at": now}),
+        ),
         Err(error) => ("502 Bad Gateway", json!({"error": format!("{error:#}")})),
     }
 }

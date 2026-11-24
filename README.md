@@ -301,6 +301,27 @@ in the paths, and load it with
 shell's. After `cargo install`, restart it with
 `launchctl kickstart -k gui/$(id -u)/local.muster.serve`.
 
+## Brief
+
+`muster brief` prints a short summary of the last 30 minutes (`--minutes N` for
+another span), and the web app's **Brief** tab asks `muster serve` for one with
+`POST /api/brief` and `{"backend", "minutes"}`. muster writes a plain-text digest of
+the current snapshot: each agent's state, title, running tool and todo, your last
+prompt to it and its last reply, and the messages between agents in that span. It pipes
+short instructions and the digest to `claude -p --tools "" --strict-mcp-config
+--no-session-persistence`, so Claude only reads it and can run no tools. Set
+`CLAUDE_BIN` to use another `claude`, or `MUSTER_BRIEF_CMD` to use any command that
+reads the instructions and digest on stdin and prints the brief, such as
+`codex exec -`.
+
+The digest goes to the service behind that command: with `claude`, Anthropic. Message
+text and replies can hold code and paths. A prompt or reply is clipped to 2,000
+characters, a message to 600, and the digest to 32 KB, leaving out the oldest
+messages. Last prompts and replies come from transcripts. Orca keeps no transcript
+muster reads, so for Orca agents muster takes the last reply from `orca agent list`, dated
+when muster first sees it, and shows no last prompt. The server writes one brief at a
+time; each takes as long as the command, about 10 s with `claude`.
+
 ## Checks
 
 ```sh
